@@ -52,6 +52,7 @@ class Settings:
     api_host: str
     api_port: int
     public_url: str | None
+    dashboard_url: str | None
     supabase_url: str | None
     supabase_key: str | None
     anthropic_api_key: str | None
@@ -89,6 +90,7 @@ def settings() -> Settings:
         api_host=env("HANDS_API_HOST", "0.0.0.0"),
         api_port=int(env("HANDS_API_PORT", "8402")),
         public_url=env("HANDS_PUBLIC_URL") or None,
+        dashboard_url=env("HANDS_DASHBOARD_URL") or None,
         supabase_url=env("HANDS_SUPABASE_URL") or None,
         supabase_key=env("HANDS_SUPABASE_KEY") or None,
         anthropic_api_key=env("ANTHROPIC_API_KEY") or None,

@@ -28,7 +28,14 @@ def cmd_serve(args: argparse.Namespace) -> None:
 
     cfg = settings()
     publisher = Publisher()
-    cell = Cell(publisher=publisher, dashboard_url=args.dashboard)
+    tunnel = None
+    public_url = args.public_url or cfg.public_url
+    if args.tunnel and not public_url:
+        from .tunnel import Tunnel
+        tunnel = Tunnel(cfg.api_port)
+        public_url = tunnel.open()
+        print(f"public address: {public_url}")
+    cell = Cell(publisher=publisher, dashboard_url=args.dashboard or cfg.dashboard_url)
     cell.start()
     from .finance import Desk
     desk = Desk(cell.ledger, publisher)
@@ -39,7 +46,6 @@ def cmd_serve(args: argparse.Namespace) -> None:
         from .teleop import Operator
         cell.teleop = Operator(cell)
     price = int(args.price * 1_000_000) if args.price else JOB_PRICE_DROPS
-    public_url = args.public_url or cfg.public_url
     app = create_app(cell, price_drops=price, public_url=public_url)
     publisher.cell(
         network=cfg.network, network_id=cfg.network_id, explorer_url=cfg.explorer_url, online=True,
@@ -53,6 +59,8 @@ def cmd_serve(args: argparse.Namespace) -> None:
         uvicorn.run(app, host=cfg.api_host, port=cfg.api_port, log_level="warning")
     finally:
         cell.stop()
+        if tunnel is not None:
+            tunnel.close()
 
 
 # -- setup ----------------------------------------------------------------------------------------
@@ -68,8 +76,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
         wallet = ledger.wallet(name)
         print(f"  {name:12s} {wallet.address}  {ledger.balance(wallet.address) / 1e6:10.3f} XRP")
     operator = ledger.wallet("operator")
+    dashboard = args.dashboard or cfg.dashboard_url
     for role in ("left", "head", "right"):
-        page = f"{args.dashboard.rstrip('/')}/arms/{role}" if args.dashboard else None
+        page = f"{dashboard.rstrip('/')}/arms/{role}" if dashboard else None
         done = did.publish(ledger, ledger.wallet(role), role, page_url=page)
         print(f"  did    {role:6s} {did.did_for(ledger.address(role))}  {done.hash[:12]}")
     existing = domain.find(ledger, operator.address)
@@ -273,6 +282,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--public-url", help="where hirers reach the API")
     p.add_argument("--dashboard", help="dashboard URL to link from job responses")
     p.add_argument("--teleop", action="store_true", help="let a human take over when autonomy fails")
+    p.add_argument("--tunnel", action="store_true", help="open a public address for the API")
     p.set_defaults(run=cmd_serve)
 
     p = sub.add_parser("setup", help="fund wallets, publish identities, create the vault domain")
