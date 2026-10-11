@@ -110,7 +110,6 @@ class Cell:
                     log.warning("%s: no table frame calibrated; it cannot take jobs", role)
                 else:
                     self.workers[role] = Worker(arm, self.kinematics, frame)
-        self._refresh_health()
         for role in self.arms:
             self.publisher.arm(role, state="idle", board=self.rig[role].board, address=self.ledger.address(role),
                                did=did.did_for(self.ledger.address(role)), joints=self.arms[role].read())
@@ -169,11 +168,14 @@ class Cell:
                                balance_drops=self.ledger.balance(address))
 
     def _health_loop(self) -> None:
-        while not self._stop.wait(HEALTH_EVERY_S):
+        """The first reading happens right away so the API never waits on the ledger to come up."""
+        while True:
             try:
                 self._refresh_health()
             except Exception as exc:
                 log.warning("health refresh failed: %s", exc)
+            if self._stop.wait(HEALTH_EVERY_S):
+                return
 
     # -- jobs -----------------------------------------------------------------------------------------
 
