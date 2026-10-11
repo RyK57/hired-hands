@@ -1,11 +1,12 @@
 "use client";
 
-import { Coins, ShieldCheck, Terminal } from "lucide-react";
+import { Coins, Mic, ShieldCheck, Terminal } from "lucide-react";
 import { useCell } from "./cell-provider";
 import { Card } from "./card";
 import { CopyButton } from "./copy-button";
 import { Empty, Loading } from "./empty";
 import { Pill } from "./pill";
+import { VoiceWidget } from "./voice-widget";
 import type { Json } from "@/lib/types";
 
 const PRIMARY_KEYS = ["scheme", "network", "asset", "currency", "amount", "maxAmountRequired", "payTo", "description"] as const;
@@ -110,6 +111,19 @@ export function Hire() {
           )}
         </Card>
       </div>
+
+      <Card title="Voice" aside={cell?.voice_agent_id ? <Pill tone="accent" live>listening</Pill> : <Pill tone="neutral">offline</Pill>}>
+        {cell?.voice_agent_id ? (
+          <div className="flex flex-col gap-3 px-4 py-4">
+            <p className="text-sm text-ink-muted">
+              Say what to move and where. The front desk places the job and the house account pays for it; the job then runs like any other.
+            </p>
+            <VoiceWidget agentId={cell.voice_agent_id} />
+          </div>
+        ) : (
+          <Empty icon={Mic} title="The front desk is not answering right now." detail="Voice orders open when the cell is online with a public address." compact />
+        )}
+      </Card>
 
       <Card title="Request" aside={<CopyButton text={request} label="Copy" />}>
         <pre className="num overflow-x-auto px-4 py-4 text-[13px] leading-6 text-ink">

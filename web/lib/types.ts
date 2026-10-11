@@ -65,6 +65,7 @@ export interface Cell {
   vault_id: string | null;
   domain_id: string | null;
   accepts: Json[] | null;
+  voice_agent_id: string | null;
   online: boolean | null;
   updated_at: string | null;
 }
