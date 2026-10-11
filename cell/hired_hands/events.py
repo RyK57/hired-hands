@@ -12,6 +12,8 @@ from .config import settings
 
 log = logging.getLogger(__name__)
 
+KEYS = {"cell": "id", "arms": "role", "jobs": "id", "channels": "id", "loans": "id", "depositors": "address"}
+
 
 class Publisher:
     """Writes to the database from a background thread; the control loop never waits on the network.
@@ -105,8 +107,15 @@ class Publisher:
     # -- workers ----------------------------------------------------------------------------------
 
     def _do_upsert(self, table: str, row: dict[str, Any]) -> None:
+        """Update the row in place when it exists, so a partial update never has to restate required columns."""
         assert self._client is not None
-        self._client.table(table).upsert(row).execute()
+        key = KEYS[table]
+        changes = {k: v for k, v in row.items() if k != key}
+        if changes:
+            updated = self._client.table(table).update(changes).eq(key, row[key]).execute()
+            if updated.data:
+                return
+        self._client.table(table).insert(row).execute()
 
     def _do_insert(self, table: str, row: dict[str, Any]) -> None:
         assert self._client is not None
