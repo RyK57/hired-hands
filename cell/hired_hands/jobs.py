@@ -146,6 +146,8 @@ class Cell:
             state = credentials.status(held)
             try:
                 if health.fit and state in ("none", "expired"):
+                    if state == "expired":  # an expired credential stays on the ledger until it is deleted
+                        credentials.revoke(self.ledger, operator, address, credentials.HEALTH)
                     issued = credentials.issue(self.ledger, operator, address, credentials.HEALTH,
                                                expires_in_s=CREDENTIAL_TTL_S)
                     credentials.accept(self.ledger, self.ledger.wallet(role), operator.address, credentials.HEALTH)
