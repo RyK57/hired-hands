@@ -11,7 +11,7 @@ second over a payment channel. The arms borrow from a lending vault to fund them
 what they earn, and each carries a live health credential that is revoked the moment a servo stops
 answering.
 
-The live dashboard shows all of it as it happens.
+The live dashboard at [hiredhands.vercel.app](https://hiredhands.vercel.app) shows all of it as it happens.
 
 ## Layout
 
@@ -58,7 +58,11 @@ Hire it:
 hands hire "put the red block in the blue cup"
 ```
 
+`hands serve --tunnel --voice --teleop` also opens a public address, a voice front desk on the dashboard, and the keyboard takeover for a human operator.
+
 ## Dashboard
+
+Deployed at [hiredhands.vercel.app](https://hiredhands.vercel.app). To run it locally:
 
 ```bash
 cd web && pnpm install && pnpm dev
