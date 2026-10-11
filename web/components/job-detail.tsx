@@ -158,6 +158,15 @@ function ChannelCard({ channel }: { channel: Channel }) {
   );
 }
 
+function paidText(row: Job): string {
+  if (row.paid_asset && row.paid_amount) {
+    const ausd = /AUSD/i.test(row.paid_asset);
+    const amount = ausd ? (Number(row.paid_amount) / 1_000_000).toFixed(2) : xrp(Number(row.paid_amount));
+    return `${amount} ${ausd ? "AUSD" : "XRP"}`;
+  }
+  return row.price_drops !== null ? `${xrp(row.price_drops)} XRP` : "—";
+}
+
 export function JobDetail({ id }: { id: string }) {
   const job = useLiveRow("jobs", id);
   const events = useLiveTable("events", { eq: ["job_id", id], order: { column: "created_at", ascending: true } });
@@ -211,7 +220,7 @@ export function JobDetail({ id }: { id: string }) {
           </Pill>
         </div>
         <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-          <Stat label="Price" value={row.price_drops !== null ? `${xrp(row.price_drops)} XRP` : "—"} />
+          <Stat label="Paid" value={paidText(row)} />
           <Stat label="Requester" value={row.requester ?? "—"} mono={false} />
           <Stat label="Payer" value={<AddressLink address={row.payer_address} />} />
           <Stat label="Worker" mono={false} value={row.worker_role ? <ArmLink role={row.worker_role} /> : "—"} />
@@ -284,7 +293,7 @@ export function JobDetail({ id }: { id: string }) {
           <Card title="Ledger">
             <KeyValue
               rows={[
-                { key: "Payment", value: <TxLink hash={row.payment_tx} /> },
+                { key: "Payment", value: <TxLink hash={row.payment_tx} href={row.payment_url} /> },
                 { key: "Escrow", value: <TxLink hash={row.escrow_tx} /> },
                 {
                   key: "Sequence",

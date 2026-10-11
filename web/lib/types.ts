@@ -136,6 +136,10 @@ export interface Job {
   price_drops: number | null;
   payer_address: string | null;
   payment_tx: string | null;
+  paid_network: string | null;
+  paid_asset: string | null;
+  paid_amount: string | null;
+  payment_url: string | null;
   escrow_tx: string | null;
   escrow_sequence: number | null;
   condition: string | null;
