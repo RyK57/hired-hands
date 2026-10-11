@@ -46,7 +46,14 @@ def cmd_serve(args: argparse.Namespace) -> None:
         from .teleop import Operator
         cell.teleop = Operator(cell)
     price = int(args.price * 1_000_000) if args.price else JOB_PRICE_DROPS
-    app = create_app(cell, price_drops=price, public_url=public_url)
+    voice = None
+    if args.voice:
+        if not public_url:
+            sys.exit("the voice front desk needs a public address: pass --tunnel or set HANDS_PUBLIC_URL")
+        from .voice import Voice
+        voice = Voice(publisher, public_url)
+        print(f"voice front desk: agent {voice.ensure()}")
+    app = create_app(cell, price_drops=price, public_url=public_url, voice=voice)
     publisher.cell(
         network=cfg.network, network_id=cfg.network_id, explorer_url=cfg.explorer_url, online=True,
         api_url=public_url or f"http://{cfg.api_host}:{cfg.api_port}", accepts=app.state.accepts,
@@ -283,6 +290,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--dashboard", help="dashboard URL to link from job responses")
     p.add_argument("--teleop", action="store_true", help="let a human take over when autonomy fails")
     p.add_argument("--tunnel", action="store_true", help="open a public address for the API")
+    p.add_argument("--voice", action="store_true", help="take orders by voice through the dashboard")
     p.set_defaults(run=cmd_serve)
 
     p = sub.add_parser("setup", help="fund wallets, publish identities, create the vault domain")

@@ -1,16 +1,17 @@
 """The job API: hire the cell with one paid request, then watch the job."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import __version__
 from .config import settings
 from .jobs import JOB_PRICE_DROPS, Cell, Job
-from .x402 import Facilitator, accepts, protect, requirements
+from .x402 import Facilitator, Hirer, accepts, protect, requirements
 
 
 class JobRequest(BaseModel):
@@ -18,7 +19,13 @@ class JobRequest(BaseModel):
     requester: str | None = Field(default=None, max_length=80)
 
 
-def create_app(cell: Cell, *, price_drops: int = JOB_PRICE_DROPS, public_url: str | None = None) -> FastAPI:
+class VoiceOrder(BaseModel):
+    instruction: str = Field(min_length=3, max_length=200)
+    caller: str | None = Field(default=None, max_length=80)
+
+
+def create_app(cell: Cell, *, price_drops: int = JOB_PRICE_DROPS, public_url: str | None = None,
+               voice=None) -> FastAPI:
     cfg = settings()
     app = FastAPI(title="Hired Hands", version=__version__)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "OPTIONS"],
@@ -68,5 +75,24 @@ def create_app(cell: Cell, *, price_drops: int = JOB_PRICE_DROPS, public_url: st
     @app.get("/arms")
     def arms() -> dict[str, Any]:
         return {role: {"health": h.to_dict()} for role, h in cell.health.items()}
+
+    @app.post("/voice/jobs")
+    async def voice_job(body: VoiceOrder, x_voice_key: str | None = Header(default=None)) -> dict[str, Any]:
+        """Orders placed by the voice front desk; the house account pays for them like any other hirer."""
+        if voice is None or not voice.authorized(x_voice_key):
+            raise HTTPException(status_code=401, detail="not the front desk")
+        hirer = Hirer(cell.ledger.wallet("client"), ledger=cell.ledger)
+        local = f"http://127.0.0.1:{cfg.api_port}/jobs"
+        response, receipt = await asyncio.to_thread(
+            hirer.post, local, {"instruction": body.instruction, "requester": body.caller or "voice"})
+        if response.status_code >= 300:
+            return {"error": response.json().get("detail", response.text) if response.headers.get("content-type", "").startswith("application/json") else response.text}
+        job = response.json()
+        return {
+            "job_id": job["id"], "short_id": job["id"][:8], "status": job["status"],
+            "price_xrp": round(job["price_drops"] / 1e6, 2),
+            "paid_with": (receipt or {}).get("transaction", "")[:12],
+            "dashboard": job.get("dashboard"),
+        }
 
     return app
