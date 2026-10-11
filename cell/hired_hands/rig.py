@@ -11,6 +11,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
@@ -74,6 +75,8 @@ class Arm:
         self.spec = spec
         self.role = spec.role
         self._signs = spec.signs
+        self.observer: Callable[[str, dict[str, float]], None] | None = None  # sees joints as they move
+        self.observe_every = 6
         self._robot = SO101Follower(
             SO101FollowerConfig(
                 id=spec.role,
@@ -114,17 +117,30 @@ class Arm:
                 settle: float = 0.25) -> dict[str, float]:
         """Glide from the present pose to `targets` (joints not listed hold still)."""
         start = self.read()
+        self._observe(start)
         goal = {**start, **{k: float(v) for k, v in targets.items() if k in JOINTS}}
         steps = max(1, int(math.ceil(duration * hz)))
         period = 1.0 / hz
         for i in range(1, steps + 1):
             t0 = time.perf_counter()
             a = _smoothstep(i / steps)
-            self.write({k: start[k] + (goal[k] - start[k]) * a for k in goal})
+            step = {k: start[k] + (goal[k] - start[k]) * a for k in goal}
+            self.write(step)
+            if i % self.observe_every == 0:
+                self._observe(step)
             time.sleep(max(0.0, period - (time.perf_counter() - t0)))
         if settle:
             time.sleep(settle)
-        return self.read()
+        final = self.read()
+        self._observe(final)
+        return final
+
+    def _observe(self, joints: dict[str, float]) -> None:
+        if self.observer is not None:
+            try:
+                self.observer(self.role, joints)
+            except Exception:
+                pass  # a watcher must never stop a move
 
     def rest(self, duration: float = 2.5) -> None:
         pose = rest_pose(self.role)
