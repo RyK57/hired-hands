@@ -56,6 +56,8 @@ class Settings:
     supabase_key: str | None
     anthropic_api_key: str | None
     anthropic_model: str
+    context_dev_api_key: str | None
+    elevenlabs_api_key: str | None
 
     def explorer_tx(self, tx_hash: str) -> str:
         return f"{self.explorer_url}/transactions/{tx_hash}"
@@ -91,4 +93,6 @@ def settings() -> Settings:
         supabase_key=env("HANDS_SUPABASE_KEY") or None,
         anthropic_api_key=env("ANTHROPIC_API_KEY") or None,
         anthropic_model=env("HANDS_ANTHROPIC_MODEL", "claude-sonnet-5-5"),
+        context_dev_api_key=env("CONTEXT_DEV_API_KEY") or None,
+        elevenlabs_api_key=env("ELEVENLABS_API_KEY") or None,
     )
