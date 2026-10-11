@@ -1,8 +1,5 @@
-"""Pay-per-job over HTTP. A request without payment is answered with 402 and the cell's payment requirements;
-a request carrying a presigned XRP Ledger payment is verified, settled on-ledger and then served.
-
-The cell runs its own facilitator, so no third party sits between a hirer and the arms.
-"""
+"""The XRP Ledger side of x402: the cell's own facilitator, which verifies and settles presigned payments
+against its ledger connection, and the client that pays a 402 in XRP or in AUSD."""
 from __future__ import annotations
 
 import asyncio
@@ -19,13 +16,17 @@ from x402_xrpl.client.presigned_payment_payer import (
     invoice_id_to_invoice_id_field,
     invoice_id_to_memo_hex,
 )
-from x402_xrpl.server.fastapi import RequireX402Options, require_x402
 from x402_xrpl.types import PaymentPayload, PaymentRequired, PaymentRequirements
 from xrpl.core.binarycodec import decode
 from xrpl.wallet import Wallet
 
 from .config import settings
 from .ledger.client import Ledger, LedgerError
+
+try:
+    from eth_account.signers.local import LocalAccount
+except ImportError:  # pragma: no cover
+    LocalAccount = Any  # type: ignore[misc,assignment]
 
 PAYMENT_HEADER = "PAYMENT-SIGNATURE"
 RECEIPT_HEADER = "PAYMENT-RESPONSE"
@@ -133,56 +134,61 @@ class Facilitator:
         return self.settlements.get(invoice_id)
 
 
-def requirements(*, pay_to: str, price_drops: int, path: str, description: str,
-                 facilitator: Facilitator) -> RequireX402Options:
-    return RequireX402Options(
-        pay_to=pay_to,
-        amount=str(int(price_drops)),
-        network=settings().network_id,
-        asset="XRP",
-        path=path,
-        description=description,
-        facilitator=facilitator,  # type: ignore[arg-type]  (the middleware only needs its HTTP client)
-        facilitator_identity={"id": "hired-hands", "name": "Hired Hands"},
-    )
-
-
-def protect(app: FastAPI, options: RequireX402Options) -> None:
-    app.middleware("http")(require_x402(options))
-
-
-def accepts(options: RequireX402Options, resource_url: str) -> list[dict[str, Any]]:
-    """The payment options a hirer will be offered, as the dashboard publishes them."""
-    return [{
-        "scheme": options.scheme, "network": options.network, "asset": options.asset,
-        "amount": options.amount, "payTo": options.pay_to, "resource": resource_url,
-        "description": options.description, "maxTimeoutSeconds": options.max_timeout_seconds,
-    }]
-
-
 class Hirer:
-    """A paying client: posts a request, pays what the 402 asks for, and posts again."""
+    """A paying client: posts a request, pays whichever option it was told to prefer, and posts again."""
 
-    def __init__(self, wallet: Wallet, *, ledger: Ledger | None = None):
+    def __init__(self, wallet: Wallet | None = None, *, ledger: Ledger | None = None,
+                 account: "LocalAccount | None" = None, prefer: str = "xrp"):
         cfg = settings()
-        self.wallet = wallet
-        self._payer = XRPLPresignedPaymentPayer(
-            XRPLPresignedPaymentPayerOptions(wallet=wallet, network=cfg.network_id, rpc_url=cfg.rpc_url),  # type: ignore[arg-type]
-            client=ledger.client if ledger else None,
-        )
+        self.prefer = prefer
+        self._payer = None
+        if wallet is not None:
+            self._payer = XRPLPresignedPaymentPayer(
+                XRPLPresignedPaymentPayerOptions(wallet=wallet, network=cfg.network_id, rpc_url=cfg.rpc_url),  # type: ignore[arg-type]
+                client=ledger.client if ledger else None,
+            )
+        self._account = account
 
-    def post(self, url: str, body: dict[str, Any], *, timeout: float = 120.0) -> tuple[httpx.Response, dict | None]:
+    def _xrpl_header(self, required: PaymentRequired) -> str | None:
+        if self._payer is None:
+            return None
+        option = next((r for r in required.accepts if self._payer.supports(r)), None)
+        if option is None:
+            return None
+        return self._payer.create_payment_header(option, resource=required.resource)
+
+    def _evm_header(self, body: dict[str, Any]) -> str | None:
+        if self._account is None:
+            return None
+        from .evm import NETWORK, transfer_authorization
+        option = next((a for a in body.get("accepts", []) if a.get("network") == NETWORK and a.get("scheme") == "exact"), None)
+        if option is None:
+            return None
+        payload = transfer_authorization(self._account, option)
+        envelope = {"x402Version": 2, "resource": body.get("resource"), "accepted": option, "payload": payload}
+        return base64.b64encode(json.dumps(envelope, separators=(",", ":")).encode()).decode()
+
+    def post(self, url: str, body: dict[str, Any], *, timeout: float = 180.0) -> tuple[httpx.Response, dict | None]:
         """Returns the final response and the settlement receipt the server attached, if it charged."""
         with httpx.Client(timeout=timeout) as http:
             first = http.post(url, json=body)
             if first.status_code != 402:
                 return first, None
-            required = PaymentRequired.from_dict(first.json())
-            option = next((r for r in required.accepts if self._payer.supports(r)), None)
-            if option is None:
-                raise RuntimeError(f"none of the offered payment options can be paid from this wallet: "
-                                   f"{[r.network + '/' + r.asset for r in required.accepts]}")
-            header = self._payer.create_payment_header(option, resource=required.resource)
+            required_body = first.json()
+            doors = [self._evm_header, lambda b: self._xrpl_header(PaymentRequired.from_dict(b))]
+            if self.prefer == "xrp":
+                doors.reverse()
+            header = None
+            for door in doors:
+                try:
+                    header = door(required_body)
+                except Exception:
+                    header = None
+                if header:
+                    break
+            if header is None:
+                raise RuntimeError("none of the offered payment options can be paid from this hirer's wallets: "
+                                   + ", ".join(f"{a.get('network')}/{a.get('asset')}" for a in required_body.get("accepts", [])))
             final = http.post(url, json=body, headers={PAYMENT_HEADER: header})
             receipt = None
             if final.headers.get(RECEIPT_HEADER):
