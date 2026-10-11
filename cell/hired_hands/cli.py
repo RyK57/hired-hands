@@ -34,6 +34,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
     desk = Desk(cell.ledger, publisher)
     if desk.ready:
         cell.lending = desk
+        desk.sync()
     if args.teleop:
         from .teleop import Operator
         cell.teleop = Operator(cell)
@@ -221,6 +222,8 @@ def cmd_finance(args: argparse.Namespace) -> None:
         desk.deposit(args.account, int(args.xrp * 1_000_000))
     elif args.action == "lend":
         desk.lend(args.role, int(args.xrp * 1_000_000))
+    elif args.action == "sync":
+        desk.sync()
     else:
         print(json.dumps(desk.status(), indent=2))
     desk.publisher.flush()
@@ -315,6 +318,7 @@ def main(argv: list[str] | None = None) -> None:
     f = fsub.add_parser("lend", help="originate a loan to an arm")
     f.add_argument("role", choices=["left", "head", "right"])
     f.add_argument("xrp", type=float)
+    fsub.add_parser("sync", help="publish the vault and loans to the dashboard")
     fsub.add_parser("status")
     p.set_defaults(run=cmd_finance)
 

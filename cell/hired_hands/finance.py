@@ -146,6 +146,33 @@ class Desk:
                              + (f"; {outstanding / 1e6:.3f} XRP left" if remaining else "; loan repaid in full"),
                              job_id=job_id, arm_role=role, tx_hash=tx_hash, amount_drops=repayment.amount_drops)
 
+    def sync(self) -> None:
+        """Publish the vault, every loan and every depositor as they stand on the ledger."""
+        if not self.ready:
+            return
+        broker = self.ledger.address("broker")
+        self.publisher.cell(vault_id=self.state["vault_id"], domain_id=self.state.get("domain_id"), broker_address=broker)
+        for role in ("left", "head", "right"):
+            if not self.ledger.has_wallet(role):
+                continue
+            debt = 0
+            for loan in lending.loans(self.ledger, self.ledger.address(role)):
+                outstanding = lending.outstanding_drops(loan)
+                debt += outstanding
+                self.publisher.loan(loan["index"], arm_role=role, principal_drops=int(loan.get("PrincipalOutstanding", 0)),
+                                    outstanding_drops=outstanding, interest_bps=int(loan.get("InterestRate", 0)) // 10,
+                                    status="active")
+            self.publisher.arm(role, debt_drops=debt)
+        share_id = self.state.get("share_mpt_id", "")
+        for name in ("depositor", "broker"):
+            if not self.ledger.has_wallet(name):
+                continue
+            address = self.ledger.address(name)
+            shares = vault.shares_held(self.ledger, address, share_id) if share_id else 0
+            if shares:
+                self.publisher.depositor(address, name="Hired Hands operator" if name == "broker" else None,
+                                         verified=True, deposited_drops=shares, shares=str(shares))
+
     # -- reporting ----------------------------------------------------------------------------------
 
     def status(self) -> dict[str, Any]:
