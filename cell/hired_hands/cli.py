@@ -97,12 +97,32 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
 
 def cmd_wallets(args: argparse.Namespace) -> None:
+    from . import evm
     from .ledger.client import WALLETS, Ledger
     ledger = Ledger()
     for name in WALLETS:
         if ledger.has_wallet(name):
             address = ledger.address(name)
             print(f"{name:12s} {address}  {ledger.balance(address) / 1e6:10.3f} XRP  {settings().explorer_account(address)}")
+    wallets = evm.Wallets()
+    for name in evm.ACCOUNTS:
+        if wallets.has(name):
+            address = wallets.address(name)
+            print(f"{name:12s} {address}  {evm.ausd_balance(address):10.2f} AUSD  (Base Sepolia)")
+
+
+def cmd_evm(args: argparse.Namespace) -> None:
+    import getpass
+
+    from . import evm
+    wallets = evm.Wallets()
+    if args.action == "import":
+        account = wallets.import_key(args.name, getpass.getpass(f"private key for {args.name}: "))
+        print(f"{args.name}: {account.address}  {evm.ausd_balance(account.address):.2f} AUSD")
+    else:
+        for name in evm.ACCOUNTS:
+            address = wallets.address(name)
+            print(f"{name:12s} {address}  {evm.ausd_balance(address):10.2f} AUSD")
 
 
 # -- hardware -------------------------------------------------------------------------------------
@@ -253,15 +273,20 @@ def cmd_hire(args: argparse.Namespace) -> None:
     from .ledger.client import Ledger
     from .x402 import Hirer
 
+    from .evm import Wallets
+
     ledger = Ledger()
-    hirer = Hirer(ledger.wallet(args.wallet), ledger=ledger)
+    evm_wallets = Wallets()
+    hirer = Hirer(ledger.wallet(args.wallet), ledger=ledger,
+                  account=evm_wallets.account(args.wallet) if evm_wallets.has(args.wallet) or args.pay == "ausd" else None,
+                  prefer=args.pay)
     url = args.url.rstrip("/")
     response, receipt = hirer.post(f"{url}/jobs", {"instruction": args.instruction, "requester": args.requester})
     if response.status_code >= 300:
         sys.exit(f"{response.status_code}: {response.text}")
     job = response.json()
     if receipt:
-        print(f"paid {receipt.get('transaction', '')[:12]}… as {receipt.get('payer')}")
+        print(f"paid on {receipt.get('network')}: {receipt.get('transaction', '')[:14]}… as {receipt.get('payer')}")
     print(f"job {job['id']} {job['status']}" + (f"  {job['dashboard']}" if job.get("dashboard") else ""))
     if args.no_wait:
         return
@@ -298,6 +323,13 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(run=cmd_setup)
 
     sub.add_parser("wallets", help="list the cell's accounts").set_defaults(run=cmd_wallets)
+
+    p = sub.add_parser("evm", help="the cell's accounts on Base")
+    esub = p.add_subparsers(dest="action", required=True)
+    e = esub.add_parser("import", help="import a private key for a named account (asked for, never echoed)")
+    e.add_argument("name", choices=["treasury", "client"])
+    esub.add_parser("show", help="addresses and AUSD balances")
+    p.set_defaults(run=cmd_evm)
 
     p = sub.add_parser("board", help="render the printable work surface")
     p.add_argument("path", nargs="?", default=str(settings().captures_dir / "work-surface.png"))
@@ -344,6 +376,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("instruction")
     p.add_argument("--url", default=f"http://127.0.0.1:{settings().api_port}")
     p.add_argument("--wallet", default="client")
+    p.add_argument("--pay", choices=["xrp", "ausd"], default="xrp", help="which door to pay through")
     p.add_argument("--requester", default=None)
     p.add_argument("--no-wait", action="store_true")
     p.set_defaults(run=cmd_hire)
