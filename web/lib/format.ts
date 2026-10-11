@@ -84,11 +84,12 @@ export function basisPoints(bps: number | null | undefined): string {
   return `${(bps / 100).toFixed(2).replace(/\.?0+$/, "")}%`;
 }
 
-export function relativeTime(iso: string | null | undefined, now = Date.now()): string {
+export function relativeTime(iso: string | null | undefined, now?: number): string {
   if (!iso) return "—";
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return "—";
-  const delta = Math.round((now - t) / 1000);
+  const reference = now && now > 0 ? now : Date.now();
+  const delta = Math.round((reference - t) / 1000);
   if (delta < 5) return "now";
   if (delta < 60) return `${delta}s ago`;
   const minutes = Math.floor(delta / 60);
