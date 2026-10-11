@@ -1,0 +1,15 @@
+{
+  "left": {
+    "board": "5B910289331",
+    "signs": { "wrist_flex": -1 }
+  },
+  "head": {
+    "board": "5B790148701",
+    "signs": { "wrist_flex": -1 },
+    "camera": true
+  },
+  "right": {
+    "board": "5B901474441",
+    "signs": {}
+  }
+}
