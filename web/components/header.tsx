@@ -1,16 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { useCell } from "./cell-provider";
+import { Nav } from "./nav";
 import { Pill } from "./pill";
 import { networkLabel } from "@/lib/format";
-
-const NAV = [
-  { href: "/", label: "Overview" },
-  { href: "/treasury", label: "Treasury" },
-  { href: "/hire", label: "Hire" },
-];
 
 export function Mark({ size = 20 }: { size?: number }) {
   return (
@@ -35,7 +29,6 @@ export function Mark({ size = 20 }: { size?: number }) {
 }
 
 export function Header() {
-  const pathname = usePathname();
   const { cell, loading } = useCell();
   const online = Boolean(cell?.online);
 
@@ -47,20 +40,7 @@ export function Header() {
           <span className="text-sm font-semibold tracking-tight">Hired Hands</span>
         </Link>
         <nav className="ml-2 hidden items-center gap-1 sm:flex">
-          {NAV.map((item) => {
-            const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`rounded px-2.5 py-1 text-sm transition-colors ${
-                  active ? "bg-inset text-ink" : "text-ink-muted hover:text-ink"
-                }`}
-              >
-                {item.label}
-              </Link>
-            );
-          })}
+          <Nav />
         </nav>
         <div className="ml-auto flex items-center gap-3">
           <span className="num hidden text-xs text-ink-muted sm:inline">{networkLabel(cell)}</span>
@@ -78,20 +58,7 @@ export function Header() {
         </div>
       </div>
       <nav className="mx-auto flex w-full max-w-7xl items-center gap-1 overflow-x-auto px-4 pb-2 sm:hidden">
-        {NAV.map((item) => {
-          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`rounded px-2.5 py-1 text-sm whitespace-nowrap ${
-                active ? "bg-inset text-ink" : "text-ink-muted"
-              }`}
-            >
-              {item.label}
-            </Link>
-          );
-        })}
+        <Nav />
       </nav>
     </header>
   );
