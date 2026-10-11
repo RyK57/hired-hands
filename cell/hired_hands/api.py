@@ -10,8 +10,12 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .config import settings
+from . import evm
 from .jobs import JOB_PRICE_DROPS, Cell, Job
-from .x402 import Facilitator, Hirer, accepts, protect, requirements
+from .paywall import LocalLane, PaymentOption, Paywall, RemoteLane, protect, settlement_of
+from .x402 import Facilitator, Hirer
+
+AUSD_PRICE = 5.0   # dollars per job
 
 
 class JobRequest(BaseModel):
@@ -24,20 +28,32 @@ class VoiceOrder(BaseModel):
     caller: str | None = Field(default=None, max_length=80)
 
 
-def create_app(cell: Cell, *, price_drops: int = JOB_PRICE_DROPS, public_url: str | None = None,
-               voice=None) -> FastAPI:
+def create_app(cell: Cell, *, price_drops: int = JOB_PRICE_DROPS, ausd_price: float = AUSD_PRICE,
+               public_url: str | None = None, voice=None) -> FastAPI:
     cfg = settings()
     app = FastAPI(title="Hired Hands", version=__version__)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "OPTIONS"],
-                       allow_headers=["*"], expose_headers=["PAYMENT-RESPONSE"])
+                       allow_headers=["*"], expose_headers=["PAYMENT-RESPONSE", "PAYMENT-REQUIRED"])
 
     facilitator = Facilitator(cell.ledger)
-    options = requirements(pay_to=cell.ledger.address("treasury"), price_drops=price_drops, path="/jobs",
-                           description="One pick-and-place job on the Hired Hands workcell", facilitator=facilitator)
-    protect(app, options)
     app.mount("/facilitator", facilitator.app)
+    options = [
+        PaymentOption(network=cfg.network_id, asset="XRP", amount=str(int(price_drops)),
+                      pay_to=cell.ledger.address("treasury"), label=f"XRP on the XRP Ledger ({cfg.network})"),
+        PaymentOption(network=evm.NETWORK, asset=evm.AUSD["address"], amount=evm.to_atomic(ausd_price),
+                      pay_to=evm.Wallets().address("treasury"), label="AUSD on Base Sepolia",
+                      extra={"name": evm.AUSD["name"], "version": evm.AUSD["version"],
+                             "assetTransferMethod": "eip3009"}),
+    ]
+    paywall = Paywall(
+        path="/jobs", description="One pick-and-place job on the Hired Hands workcell", options=options,
+        lanes={cfg.network_id: LocalLane(facilitator.app, cfg.explorer_tx),
+               evm.NETWORK: RemoteLane(evm.FACILITATOR_URL, evm.explorer_tx)},
+        invoiced_networks=(cfg.network_id,),
+    )
+    protect(app, paywall)
     base = (public_url or f"http://{cfg.api_host}:{cfg.api_port}").rstrip("/")
-    app.state.accepts = accepts(options, f"{base}/jobs")
+    app.state.accepts = paywall.accepts(f"{base}/jobs")
 
     @app.get("/")
     def index() -> dict[str, Any]:
@@ -54,11 +70,11 @@ def create_app(cell: Cell, *, price_drops: int = JOB_PRICE_DROPS, public_url: st
 
     @app.post("/jobs", status_code=202)
     async def create_job(body: JobRequest, request: Request) -> dict[str, Any]:
-        settlement = facilitator.settlement_for(request)
+        settlement = settlement_of(request)
         if settlement is None:
             raise HTTPException(status_code=402, detail="payment required")
         job = Job(instruction=body.instruction.strip(), requester=body.requester, payer=settlement.payer,
-                  payment_tx=settlement.tx_hash, price_drops=settlement.amount_drops)
+                  payment_tx=settlement.tx_hash, price_drops=price_drops, paid=settlement)
         cell.submit(job)
         out = job.summary()
         if cell.dashboard_url:

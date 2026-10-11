@@ -17,6 +17,7 @@ from .health import Health, assess
 from .kinematics import Kinematics, TableFrame
 from .ledger import batch, credentials, did, escrow
 from .ledger.client import Ledger
+from .paywall import Settlement
 from .perception import Scene, SceneError, observe
 from .rig import ROLES, Arm, load_rig
 from .selector import Plan, SelectionError, plan as make_plan
@@ -52,12 +53,14 @@ class Job:
     verdict: Verdict | None = None
     error: str | None = None
     teleop: bool = False
+    paid: Settlement | None = None
     created_at: float = field(default_factory=time.time)
 
     def summary(self) -> dict[str, Any]:
         return {
             "id": self.id, "status": self.status, "instruction": self.instruction, "price_drops": self.price_drops,
             "worker": self.worker, "payer": self.payer, "payment_tx": self.payment_tx,
+            "paid": self.paid.to_dict() if self.paid else None,
             "escrow_tx": self.escrow.tx_hash if self.escrow else None,
             "verdict": self.verdict.to_dict() if self.verdict else None, "error": self.error,
         }
@@ -176,10 +179,17 @@ class Cell:
 
     def submit(self, job: Job) -> Job:
         self.jobs[job.id] = job
+        paid = job.paid
         self.publisher.job(job.id, instruction=job.instruction, requester=job.requester, status=job.status,
-                           price_drops=job.price_drops, payer_address=job.payer, payment_tx=job.payment_tx)
-        self.publisher.event("job.paid", f"job paid: \"{job.instruction}\"", job_id=job.id, tx_hash=job.payment_tx,
-                             amount_drops=job.price_drops)
+                           price_drops=job.price_drops, payer_address=job.payer, payment_tx=job.payment_tx,
+                           paid_network=paid.network if paid else None, paid_asset=paid.label if paid else None,
+                           paid_amount=paid.amount if paid else None, payment_url=paid.explorer_url if paid else None)
+        message = f"job paid: \"{job.instruction}\"" + (f" ({paid.label})" if paid else "")
+        if paid and paid.explorer_url and not paid.explorer_url.startswith(settings().explorer_url):
+            self.publisher.event("job.paid", message, job_id=job.id, meta={"explorer_url": paid.explorer_url,
+                                 "transaction": paid.tx_hash, "amount": paid.amount, "asset": paid.label})
+        else:
+            self.publisher.event("job.paid", message, job_id=job.id, tx_hash=job.payment_tx, amount_drops=job.price_drops)
         self._queue.put(job)
         return job
 
@@ -406,11 +416,18 @@ class Cell:
         self.publisher.event("error", reason, job_id=job.id)
         if job.payer and job.payment_tx:
             try:
-                refund = self.ledger.submit(batch.payment(self.ledger.wallet("treasury"), job.payer, job.price_drops),
-                                            self.ledger.wallet("treasury"))
-                self._set(job, "refunded")
-                self.publisher.event("job.refunded", f"{job.price_drops / 1e6:.2f} XRP returned to the hirer",
-                                     job_id=job.id, tx_hash=refund.hash, amount_drops=job.price_drops)
+                if job.paid is not None and job.paid.network != settings().network_id:
+                    from . import evm
+                    tx_hash = evm.refund(job.payer, job.paid.amount)
+                    self._set(job, "refunded")
+                    self.publisher.event("job.refunded", f"{evm.from_atomic(job.paid.amount):.2f} AUSD returned to the hirer",
+                                         job_id=job.id, meta={"explorer_url": evm.explorer_tx(tx_hash), "transaction": tx_hash})
+                else:
+                    refund = self.ledger.submit(batch.payment(self.ledger.wallet("treasury"), job.payer, job.price_drops),
+                                                self.ledger.wallet("treasury"))
+                    self._set(job, "refunded")
+                    self.publisher.event("job.refunded", f"{job.price_drops / 1e6:.2f} XRP returned to the hirer",
+                                         job_id=job.id, tx_hash=refund.hash, amount_drops=job.price_drops)
             except Exception as exc:
                 self.publisher.event("error", f"refund failed: {exc}", job_id=job.id)
         with self._lock:
