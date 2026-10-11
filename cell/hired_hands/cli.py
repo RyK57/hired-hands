@@ -30,6 +30,10 @@ def cmd_serve(args: argparse.Namespace) -> None:
     publisher = Publisher()
     cell = Cell(publisher=publisher, dashboard_url=args.dashboard)
     cell.start()
+    from .finance import Desk
+    desk = Desk(cell.ledger, publisher)
+    if desk.ready:
+        cell.lending = desk
     if args.teleop:
         from .teleop import Operator
         cell.teleop = Operator(cell)
@@ -195,6 +199,33 @@ def cmd_rest(args: argparse.Namespace) -> None:
             print(f"{role}: {exc}")
 
 
+# -- finance --------------------------------------------------------------------------------------
+
+def cmd_finance(args: argparse.Namespace) -> None:
+    from .finance import Desk
+    from .ledger.client import Ledger
+
+    desk = Desk(Ledger())
+    if args.action == "setup":
+        if desk.ready and not args.again:
+            sys.exit("the vault already exists; pass --again to open another")
+        desk.setup(seed_drops=int(args.seed * 1_000_000), subscription_s=args.window)
+    elif args.action == "admit":
+        from .verify import company
+        verdict = company(args.domain) if args.domain else None
+        if args.domain and not verdict:
+            sys.exit(f"{args.domain} could not be verified")
+        address = desk.ledger.address(args.account) if desk.ledger.has_wallet(args.account) else args.account
+        desk.admit(address, name=(verdict or {}).get("name") or args.name, company_domain=args.domain)
+    elif args.action == "deposit":
+        desk.deposit(args.account, int(args.xrp * 1_000_000))
+    elif args.action == "lend":
+        desk.lend(args.role, int(args.xrp * 1_000_000))
+    else:
+        print(json.dumps(desk.status(), indent=2))
+    desk.publisher.flush()
+
+
 # -- hire -----------------------------------------------------------------------------------------
 
 def cmd_hire(args: argparse.Namespace) -> None:
@@ -267,6 +298,25 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("health", help="read every servo and score each arm").set_defaults(run=cmd_health)
     sub.add_parser("rest", help="fold every arm").set_defaults(run=cmd_rest)
+
+    p = sub.add_parser("finance", help="the vault and the loan desk")
+    fsub = p.add_subparsers(dest="action", required=True)
+    f = fsub.add_parser("setup", help="open the vault and the loan desk")
+    f.add_argument("--seed", type=float, default=20.0, help="XRP the operator deposits")
+    f.add_argument("--window", type=float, default=180.0, help="seconds deposits stay open")
+    f.add_argument("--again", action="store_true")
+    f = fsub.add_parser("admit", help="verify a depositor and issue their credential")
+    f.add_argument("account", help="wallet name or address")
+    f.add_argument("--domain", help="the depositor's company website, checked before admission")
+    f.add_argument("--name")
+    f = fsub.add_parser("deposit", help="deposit from one of the cell's wallets")
+    f.add_argument("account")
+    f.add_argument("xrp", type=float)
+    f = fsub.add_parser("lend", help="originate a loan to an arm")
+    f.add_argument("role", choices=["left", "head", "right"])
+    f.add_argument("xrp", type=float)
+    fsub.add_parser("status")
+    p.set_defaults(run=cmd_finance)
 
     p = sub.add_parser("hire", help="pay for a job and watch it")
     p.add_argument("instruction")
