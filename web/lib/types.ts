@@ -66,6 +66,8 @@ export interface Cell {
   domain_id: string | null;
   accepts: Json[] | null;
   voice_agent_id: string | null;
+  camera_url: string | null;
+  layout: Json | null;
   online: boolean | null;
   updated_at: string | null;
 }
