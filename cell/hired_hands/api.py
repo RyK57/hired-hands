@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
@@ -91,6 +92,39 @@ def create_app(cell: Cell, *, price_drops: int = JOB_PRICE_DROPS, ausd_price: fl
     @app.get("/arms")
     def arms() -> dict[str, Any]:
         return {role: {"health": h.to_dict()} for role, h in cell.health.items()}
+
+    @app.get("/camera.mjpg")
+    async def camera_stream():
+        """The head camera, live, as motion JPEG."""
+        import cv2
+
+        async def frames():
+            while True:
+                try:
+                    with cell._lock:
+                        frame = cell.camera.read(settle_frames=0)
+                    ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if ok:
+                        yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                               + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg.tobytes() + b"\r\n")
+                except Exception:
+                    pass
+                await asyncio.sleep(0.12)
+
+        return StreamingResponse(frames(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+    @app.post("/jobs/house")
+    async def house_job(body: JobRequest) -> dict[str, Any]:
+        """A job placed from the dashboard: the house account pays through the same door as everyone else."""
+        hirer = Hirer(cell.ledger.wallet("client"), ledger=cell.ledger)
+        local = f"http://127.0.0.1:{cfg.api_port}/jobs"
+        response, receipt = await asyncio.to_thread(
+            hirer.post, local, {"instruction": body.instruction, "requester": body.requester or "dashboard"})
+        if response.status_code >= 300:
+            raise HTTPException(status_code=response.status_code, detail=response.text[:200])
+        job = response.json()
+        job["receipt"] = receipt
+        return job
 
     @app.post("/voice/jobs")
     async def voice_job(body: VoiceOrder, x_voice_key: str | None = Header(default=None)) -> dict[str, Any]:

@@ -59,6 +59,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
     publisher.cell(
         network=cfg.network, network_id=cfg.network_id, explorer_url=cfg.explorer_url, online=True,
         api_url=public_url or f"http://{cfg.api_host}:{cfg.api_port}", accepts=app.state.accepts,
+        camera_url=(public_url or f"http://127.0.0.1:{cfg.api_port}").rstrip("/") + "/camera.mjpg",
         operator_address=cell.ledger.address("operator"), treasury_address=cell.ledger.address("treasury"),
         broker_address=cell.ledger.address("broker"),
     )
@@ -233,9 +234,17 @@ def cmd_survey(args: argparse.Namespace) -> None:
     out = settings().captures_dir / "survey.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out), scene.annotated())
-    print(f"markers {scene.markers}; {len(scene.candidates)} object(s):")
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    import numpy as np
+    med = np.median(hsv.reshape(-1, 3), axis=0)
+    print(f"{'table map' if scene.mapped else 'no table map (pixels)'}; frame median hue {med[0]:.0f} sat {med[1]:.0f} val {med[2]:.0f}; "
+          f"{len(scene.candidates)} object(s):")
     for c in scene.candidates:
-        print(f"  {c.label:12s} at ({c.centre_table[0]:+.3f}, {c.centre_table[1]:+.3f}) m, {c.area_px} px")
+        x0, y0, w, h = c.bbox
+        patch = hsv[y0:y0 + h, x0:x0 + w].reshape(-1, 3)
+        where = (f"({c.centre_table[0]:+.3f}, {c.centre_table[1]:+.3f}) m" if c.centre_table
+                 else f"pixel ({c.centre_px[0]:.0f}, {c.centre_px[1]:.0f})")
+        print(f"  {c.label:12s} at {where}, {c.area_px} px, hue {c.hue:.0f} sat {np.median(patch[:, 1]):.0f} val {np.median(patch[:, 2]):.0f}")
     print(f"-> {out}")
     if head is not None:
         if args.rest:

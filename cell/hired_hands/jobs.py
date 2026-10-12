@@ -88,6 +88,7 @@ class Cell:
         self._stop = threading.Event()
         self.teleop = None                     # set by the operator when a human can take over
         self.scene: str | None = None          # a recorded skill to use for every job, when set
+        self.last_frame = None
         self.take_speed = 1.0                  # playback speed for recorded skills
 
     # -- lifecycle --------------------------------------------------------------------------------
@@ -228,6 +229,7 @@ class Cell:
         with self._lock:
             self.head.look(lambda m: self.publisher.event("survey", m, job_id=job.id, arm_role="head"))
             frame = self.camera.read()
+        self.last_frame = frame
         scene = observe(frame)
         path = settings().captures_dir / f"{job.id}-{label}.jpg"
         import cv2
