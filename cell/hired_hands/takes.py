@@ -143,7 +143,8 @@ def play(arms: dict[str, Arm], scene: str, *, speed: float = 1.0, lead_s: float 
     takes = {r: t for r, t in load_scene(scene).items() if r in arms}
     if not takes:
         raise FileNotFoundError(f"none of the connected arms has a take in {scene!r}")
-    duration = float(np.mean([t.duration for t in takes.values()])) / max(speed, 0.05)
+    # the longest take sets the pace: shorter ones are stretched to it, nothing is ever sped up
+    duration = float(max(t.duration for t in takes.values())) / max(speed, 0.05)
     frames = {r: t.resampled(duration) for r, t in takes.items()}
     if log:
         log(f"playing '{scene}' on {', '.join(takes)}: {duration:.1f} s")
