@@ -6,6 +6,7 @@ the way in and on the way out; nothing above this module needs to know which arm
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import time
@@ -13,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from lerobot.motors.feetech.tables import STS_SMS_SERIES_CONTROL_TABLE as FEETECH_TABLE
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .config import settings
@@ -91,13 +93,48 @@ class Arm:
     def connected(self) -> bool:
         return self._robot.is_connected
 
-    def connect(self) -> None:
-        self._robot.connect(calibrate=False)
+    def connect(self, attempts: int = 4) -> None:
+        """A marginal supply can leave a servo with a latched protection flag, which the bus reports as an
+        error on the next read. Clear the flags and try again rather than give up on the arm."""
+        last: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                self._robot.connect(calibrate=False)
+                break
+            except Exception as exc:
+                last = exc
+                with contextlib.suppress(Exception):
+                    self._robot.bus.disconnect(disable_torque=False)
+                self._clear_faults()
+                time.sleep(0.6 * (attempt + 1))
+        else:
+            raise RuntimeError(f"{self.role}: could not connect ({last})")
         if not self._robot.is_calibrated:
             self._robot.disconnect()
             raise RuntimeError(
                 f"{self.role}: the servos do not match {self._robot.calibration_fpath}; refusing to drive them"
             )
+
+    def _clear_faults(self) -> None:
+        """Torque off, park the goal on the present position, torque on: the sequence that clears a latched
+        fault without the joint lurching. Done at the packet level, below the bus's own error handling."""
+        bus = self._robot.bus
+        try:
+            bus._connect(handshake=False)
+        except Exception:
+            return
+        t_addr, t_len = FEETECH_TABLE["Torque_Enable"]
+        g_addr, g_len = FEETECH_TABLE["Goal_Position"]
+        p_addr, p_len = FEETECH_TABLE["Present_Position"]
+        for name, motor in bus.motors.items():
+            bus._write(t_addr, t_len, motor.id, 0, num_retry=3, raise_on_error=False)
+            time.sleep(0.05)
+            here, _, _ = bus._read(p_addr, p_len, motor.id, num_retry=3, raise_on_error=False)
+            if here:
+                bus._write(g_addr, g_len, motor.id, int(here), num_retry=3, raise_on_error=False)
+            bus._write(t_addr, t_len, motor.id, 1, num_retry=3, raise_on_error=False)
+        with contextlib.suppress(Exception):
+            bus.disconnect(disable_torque=False)
 
     def disconnect(self) -> None:
         if self._robot.is_connected:
@@ -107,11 +144,25 @@ class Arm:
         return {k: (-v if k in self._signs else v) for k, v in values.items()}
 
     def read(self) -> dict[str, float]:
-        obs = self._robot.get_observation()
-        return self._flip({k.removesuffix(".pos"): float(v) for k, v in obs.items() if k.endswith(".pos")})
+        for attempt in range(3):
+            try:
+                obs = self._robot.get_observation()
+                return self._flip({k.removesuffix(".pos"): float(v) for k, v in obs.items() if k.endswith(".pos")})
+            except RuntimeError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.05)
+        raise RuntimeError(f"{self.role}: no reading")
 
     def write(self, targets: dict[str, float]) -> None:
-        self._robot.send_action({f"{k}.pos": v for k, v in self._flip(targets).items()})
+        for attempt in range(3):
+            try:
+                self._robot.send_action({f"{k}.pos": v for k, v in self._flip(targets).items()})
+                return
+            except RuntimeError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.05)
 
     def move_to(self, targets: dict[str, float], duration: float = 1.5, hz: float = 30.0,
                 settle: float = 0.25) -> dict[str, float]:
