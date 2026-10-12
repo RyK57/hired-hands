@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import cv2
 
-from .board import WORK_AREA
+from .table import work_area
 from .config import settings
 from .perception import HUE_NAMES, Candidate, Scene
 
@@ -117,7 +117,7 @@ def plan_by_model(instruction: str, scene: Scene) -> Plan:
     ok, jpeg = cv2.imencode(".jpg", scene.annotated(), [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:
         raise SelectionError("could not encode the frame")
-    (x0, y0), (x1, y1) = WORK_AREA
+    (x0, y0), (x1, y1) = work_area()
     listing = "\n".join(
         f"{c.index}: {c.colour}, ({c.centre_table[0]:+.3f}, {c.centre_table[1]:+.3f})" for c in scene.candidates
     ) or "(none)"

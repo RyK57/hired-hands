@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from .board import DICTIONARY, MARKERS, WORK_AREA, marker_corners_table
+from .board import DICTIONARY, MARKERS, marker_corners_table
+from .table import TableMap, work_area
 
 MIN_MARKERS = 2
 MIN_AREA_FRACTION = 0.0008   # of the work area, in pixels
@@ -70,7 +71,7 @@ class Scene:
 
     def annotated(self) -> np.ndarray:
         out = self.image.copy()
-        (ax, ay), (bx, by) = WORK_AREA
+        (ax, ay), (bx, by) = work_area()
         area = np.array([[ax, ay], [bx, ay], [bx, by], [ax, by]], dtype=np.float32)
         poly = table_to_px(self.homography, area).astype(np.int32)
         cv2.polylines(out, [poly], True, (90, 90, 90), 1, cv2.LINE_AA)
@@ -100,32 +101,34 @@ def table_to_px(h: np.ndarray, table: np.ndarray) -> np.ndarray:
 
 
 def find_table(image: np.ndarray) -> tuple[np.ndarray, list[int]]:
-    """Homography from image pixels to the table frame, from whichever sheet markers are visible."""
+    """Homography from image pixels to the table frame: from the sheet's markers when they are in view,
+    otherwise from the map the arms measured themselves."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(DICTIONARY),
                                        cv2.aruco.DetectorParameters())
     corners, ids, _ = detector.detectMarkers(gray)
-    if ids is None:
-        raise SceneError("no markers visible: is the sheet in view and lit?")
     src, dst, found = [], [], []
-    for quad, marker_id in zip(corners, ids.flatten()):
-        marker_id = int(marker_id)
-        if marker_id not in MARKERS:
-            continue
-        src.append(quad.reshape(4, 2))
-        dst.append(marker_corners_table(marker_id))
-        found.append(marker_id)
-    if len(found) < MIN_MARKERS:
-        raise SceneError(f"only {len(found)} marker(s) visible ({found}); need {MIN_MARKERS}")
-    h, _ = cv2.findHomography(np.concatenate(src), np.concatenate(dst), cv2.RANSAC, 0.004)
-    if h is None:
-        raise SceneError("markers seen but no consistent table frame could be fitted")
-    return h, sorted(found)
+    if ids is not None:
+        for quad, marker_id in zip(corners, ids.flatten()):
+            marker_id = int(marker_id)
+            if marker_id not in MARKERS:
+                continue
+            src.append(quad.reshape(4, 2))
+            dst.append(marker_corners_table(marker_id))
+            found.append(marker_id)
+    if len(found) >= MIN_MARKERS:
+        h, _ = cv2.findHomography(np.concatenate(src), np.concatenate(dst), cv2.RANSAC, 0.004)
+        if h is not None:
+            return h, sorted(found)
+    table = TableMap.load()
+    if table is not None:
+        return table.homography, []
+    raise SceneError("the table is not calibrated and no markers are in view")
 
 
 def find_objects(image: np.ndarray, h: np.ndarray) -> list[Candidate]:
     """Saturated blobs inside the work area, numbered left to right then front to back in table coordinates."""
-    (ax, ay), (bx, by) = WORK_AREA
+    (ax, ay), (bx, by) = work_area()
     area = np.array([[ax, ay], [bx, ay], [bx, by], [ax, by]], dtype=np.float32)
     poly = table_to_px(h, area).astype(np.int32)
     mask_area = np.zeros(image.shape[:2], dtype=np.uint8)
