@@ -36,6 +36,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
         public_url = tunnel.open()
         print(f"public address: {public_url}")
     cell = Cell(publisher=publisher, dashboard_url=args.dashboard or cfg.dashboard_url)
+    cell.scene = args.scene
     cell.start()
     from .finance import Desk
     desk = Desk(cell.ledger, publisher)
@@ -297,6 +298,43 @@ def cmd_finance(args: argparse.Namespace) -> None:
     desk.publisher.flush()
 
 
+# -- recorded skills --------------------------------------------------------------------------------
+
+def cmd_take(args: argparse.Namespace) -> None:
+    from . import takes
+
+    if args.action == "import":
+        folder = Path(args.source).expanduser()
+        if folder.is_dir():
+            files = takes.latest_takes(folder, prefix=args.prefix)
+            if not files:
+                sys.exit(f"no {args.prefix}_<arm>_NN.json recordings in {folder}")
+        else:
+            files = {None: folder}
+        for role, path in files.items():
+            out = takes.import_take(path, args.scene, role)
+            print(f"{out.stem:5s} <- {path.name}")
+        if args.instruction:
+            takes.describe(args.scene, args.instruction)
+        print(f"scene '{args.scene}': {', '.join(takes.load_scene(args.scene))}")
+    elif args.action == "play":
+        from .rig import Arm, load_rig
+        arms = {}
+        for role, spec in load_rig().items():
+            arm = Arm(spec)
+            arm.connect()
+            arms[role] = arm
+        try:
+            takes.play(arms, args.scene, speed=args.speed, log=print)
+        finally:
+            for arm in arms.values():
+                arm.rest()
+                arm.disconnect()
+    else:
+        for name, meta in takes.scenes().items():
+            print(f"{name:12s} {', '.join(meta['arms']):18s} {meta.get('instruction') or ''}")
+
+
 # -- hire -----------------------------------------------------------------------------------------
 
 def cmd_hire(args: argparse.Namespace) -> None:
@@ -348,6 +386,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--teleop", action="store_true", help="let a human take over when autonomy fails")
     p.add_argument("--tunnel", action="store_true", help="open a public address for the API")
     p.add_argument("--voice", action="store_true", help="take orders by voice through the dashboard")
+    p.add_argument("--scene", help="use this recorded skill for every job")
     p.set_defaults(run=cmd_serve)
 
     p = sub.add_parser("setup", help="fund wallets, publish identities, create the vault domain")
@@ -404,6 +443,19 @@ def main(argv: list[str] | None = None) -> None:
     fsub.add_parser("sync", help="publish the vault and loans to the dashboard")
     fsub.add_parser("status")
     p.set_defaults(run=cmd_finance)
+
+    p = sub.add_parser("take", help="recorded skills")
+    tsub = p.add_subparsers(dest="action", required=True)
+    ti = tsub.add_parser("import", help="bring recordings into a scene")
+    ti.add_argument("scene")
+    ti.add_argument("source", help="a recording, or a folder of them (the newest per arm is taken)")
+    ti.add_argument("--prefix", default="take", help="file name prefix in a folder")
+    ti.add_argument("--instruction", help="what the scene carries out, e.g. 'put the white drone in the orange container'")
+    tp = tsub.add_parser("play", help="play a scene on every connected arm")
+    tp.add_argument("scene")
+    tp.add_argument("--speed", type=float, default=1.0)
+    tsub.add_parser("list")
+    p.set_defaults(run=cmd_take)
 
     p = sub.add_parser("hire", help="pay for a job and watch it")
     p.add_argument("instruction")
