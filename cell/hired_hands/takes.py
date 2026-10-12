@@ -184,3 +184,58 @@ def play(arms: dict[str, Arm], scene: str, *, speed: float = 1.0, lead_s: float 
 
 def remove(scene: str) -> None:
     shutil.rmtree(scene_dir(scene), ignore_errors=True)
+
+
+def record(arms: dict[str, Arm], scene: str, *, hz: float = PLAY_HZ, countdown_s: float = 3.0,
+           log=print, instruction: str | None = None) -> dict[str, Take]:
+    """Record every arm at once while a person moves them by hand. Torque is off during the take and comes
+    back when it ends, so the arms hold where they were left."""
+    import sys
+    import threading
+
+    for arm in arms.values():
+        arm.torque(False)
+    log(f"torque is off on {', '.join(arms)}. Press Enter to start recording.")
+    input()
+    for n in range(int(countdown_s), 0, -1):
+        log(f"  {n}…")
+        time.sleep(1.0)
+    log("● recording — move the arms. Press Enter to stop.")
+
+    stop = threading.Event()
+    threading.Thread(target=lambda: (sys.stdin.readline(), stop.set()), daemon=True).start()
+    frames: dict[str, list[list[float]]] = {r: [] for r in arms}
+    t0 = time.perf_counter()
+    period = 1.0 / hz
+    tick = 0
+    while not stop.is_set():
+        now = time.perf_counter() - t0
+        for role, arm in arms.items():
+            try:
+                q = arm.read()
+            except Exception:
+                continue   # a dropped read loses one frame, not the take
+            frames[role].append([round(now, 4)] + [round(q[j], 3) for j in JOINTS])
+        tick += 1
+        if tick % int(hz * 5) == 0:
+            log(f"  {now:5.1f} s")
+        time.sleep(max(0.0, t0 + tick * period - time.perf_counter()))
+    duration = time.perf_counter() - t0
+    for arm in arms.values():
+        arm.torque(True)
+
+    folder = scene_dir(scene)
+    folder.mkdir(parents=True, exist_ok=True)
+    takes: dict[str, Take] = {}
+    for role, rows in frames.items():
+        if len(rows) < 2:
+            continue
+        (folder / f"{role}.json").write_text(json.dumps({
+            "role": role, "motors": list(JOINTS), "frames": rows,
+            "recorded_at": time.strftime("%Y-%m-%d %H:%M:%S"), "source": "by hand",
+        }) + "\n")
+        takes[role] = Take(role=role, motors=tuple(JOINTS), frames=np.asarray(rows, dtype=float))
+    if instruction:
+        describe(scene, instruction)
+    log(f"saved {duration:.1f} s on {', '.join(takes)} -> {folder}")
+    return takes

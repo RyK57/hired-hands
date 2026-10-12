@@ -317,18 +317,31 @@ def cmd_take(args: argparse.Namespace) -> None:
         if args.instruction:
             takes.describe(args.scene, args.instruction)
         print(f"scene '{args.scene}': {', '.join(takes.load_scene(args.scene))}")
-    elif args.action == "play":
+    elif args.action in ("play", "record"):
         from .rig import Arm, load_rig
+        wanted = [r.strip() for r in args.arms.split(",")] if getattr(args, "arms", None) else None
         arms = {}
         for role, spec in load_rig().items():
+            if wanted and role not in wanted:
+                continue
             arm = Arm(spec)
-            arm.connect()
+            try:
+                arm.connect()
+            except Exception as exc:
+                print(f"{role}: not connected ({exc})")
+                continue
             arms[role] = arm
+        if not arms:
+            sys.exit("no arm connected")
         try:
-            takes.play(arms, args.scene, speed=args.speed, log=print)
+            if args.action == "record":
+                takes.record(arms, args.scene, instruction=args.instruction)
+            else:
+                takes.play(arms, args.scene, speed=args.speed, log=print)
         finally:
             for arm in arms.values():
-                arm.rest()
+                if args.action == "play" or args.rest:
+                    arm.rest()
                 arm.disconnect()
     else:
         for name, meta in takes.scenes().items():
@@ -451,9 +464,16 @@ def main(argv: list[str] | None = None) -> None:
     ti.add_argument("source", help="a recording, or a folder of them (the newest per arm is taken)")
     ti.add_argument("--prefix", default="take", help="file name prefix in a folder")
     ti.add_argument("--instruction", help="what the scene carries out, e.g. 'put the white drone in the orange container'")
+    tr = tsub.add_parser("record", help="record every arm at once while you move them by hand")
+    tr.add_argument("scene")
+    tr.add_argument("--arms", help="comma list of arms to record (default: all connected)")
+    tr.add_argument("--instruction", help="what the scene carries out")
+    tr.add_argument("--rest", action="store_true", help="fold the arms afterwards")
     tp = tsub.add_parser("play", help="play a scene on every connected arm")
     tp.add_argument("scene")
+    tp.add_argument("--arms", help="comma list of arms to play (default: all connected)")
     tp.add_argument("--speed", type=float, default=1.0)
+    tp.set_defaults(rest=True)
     tsub.add_parser("list")
     p.set_defaults(run=cmd_take)
 
