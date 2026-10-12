@@ -12,10 +12,20 @@ from .board import DICTIONARY, MARKERS, marker_corners_table
 from .table import TableMap, work_area
 
 MIN_MARKERS = 2
-MIN_AREA_FRACTION = 0.0008   # of the work area, in pixels
+MIN_AREA_FRACTION = 0.0015   # of the work area, in pixels
 MAX_AREA_FRACTION = 0.25
-SATURATION_MIN = 80
-VALUE_MIN = 50
+
+# Colour classes. Saturated objects are told apart by hue; white ones are bright and unsaturated. A wooden
+# table is dim and only mildly saturated, so it falls below both rules. Override any value in
+# state/perception.json to suit the light on the day.
+DEFAULT_THRESHOLDS = {
+    "saturation_min": 130, "value_min": 110,        # a coloured object
+    "white_saturation_max": 60, "white_value_min": 185,  # a white object
+    "close_px": 9,                                   # merge holes in lattice-like objects
+    "table_hue_tolerance": 10, "table_saturation_tolerance": 50, "table_value_tolerance": 60,   # what still counts as table
+}
+SATURATION_MIN = DEFAULT_THRESHOLDS["saturation_min"]
+VALUE_MIN = DEFAULT_THRESHOLDS["value_min"]
 
 # hue (OpenCV 0-180) -> name; red wraps around
 HUE_NAMES = (
@@ -31,7 +41,20 @@ class SceneError(RuntimeError):
     pass
 
 
+def thresholds() -> dict[str, int]:
+    import json
+
+    from .config import settings
+    path = settings().state_dir / "perception.json"
+    out = dict(DEFAULT_THRESHOLDS)
+    if path.exists():
+        out.update({k: int(v) for k, v in json.loads(path.read_text()).items() if k in out})
+    return out
+
+
 def hue_name(hue: float) -> str:
+    if hue < 0:
+        return "white"
     for lo, hi, name in HUE_NAMES:
         if lo <= hue < hi:
             return name
@@ -43,7 +66,7 @@ class Candidate:
     index: int
     colour: str
     centre_px: tuple[float, float]
-    centre_table: tuple[float, float]
+    centre_table: tuple[float, float] | None   # known only once the table has been measured
     area_px: int
     bbox: tuple[int, int, int, int]
     hue: float
@@ -56,7 +79,7 @@ class Candidate:
         return {
             "index": self.index, "colour": self.colour,
             "px": [round(self.centre_px[0], 1), round(self.centre_px[1], 1)],
-            "table": [round(self.centre_table[0], 4), round(self.centre_table[1], 4)],
+            "table": [round(self.centre_table[0], 4), round(self.centre_table[1], 4)] if self.centre_table else None,
             "area_px": self.area_px,
         }
 
@@ -64,17 +87,22 @@ class Candidate:
 @dataclass
 class Scene:
     image: np.ndarray
-    homography: np.ndarray            # pixels -> table (m)
+    homography: np.ndarray | None     # pixels -> table (m); None until the table has been measured
     markers: list[int]
     candidates: list[Candidate] = field(default_factory=list)
     taken_at: float = field(default_factory=time.time)
 
+    @property
+    def mapped(self) -> bool:
+        return self.homography is not None
+
     def annotated(self) -> np.ndarray:
         out = self.image.copy()
-        (ax, ay), (bx, by) = work_area()
-        area = np.array([[ax, ay], [bx, ay], [bx, by], [ax, by]], dtype=np.float32)
-        poly = table_to_px(self.homography, area).astype(np.int32)
-        cv2.polylines(out, [poly], True, (90, 90, 90), 1, cv2.LINE_AA)
+        if self.homography is not None:
+            (ax, ay), (bx, by) = work_area()
+            area = np.array([[ax, ay], [bx, ay], [bx, by], [ax, by]], dtype=np.float32)
+            poly = table_to_px(self.homography, area).astype(np.int32)
+            cv2.polylines(out, [poly], True, (90, 90, 90), 1, cv2.LINE_AA)
         for c in self.candidates:
             colour = PALETTE[c.index % len(PALETTE)]
             x, y = int(c.centre_px[0]), int(c.centre_px[1])
@@ -83,8 +111,6 @@ class Scene:
             cv2.putText(out, str(c.index), (x - 7, y + 7), cv2.FONT_HERSHEY_SIMPLEX, 0.65, colour, 2, cv2.LINE_AA)
         return out
 
-    def to_table(self, px) -> np.ndarray:
-        return px_to_table(self.homography, np.asarray([px], dtype=np.float32))[0]
 
     def find(self, index: int) -> Candidate | None:
         return next((c for c in self.candidates if c.index == index), None)
@@ -126,23 +152,46 @@ def find_table(image: np.ndarray) -> tuple[np.ndarray, list[int]]:
     raise SceneError("the table is not calibrated and no markers are in view")
 
 
-def find_objects(image: np.ndarray, h: np.ndarray) -> list[Candidate]:
-    """Saturated blobs inside the work area, numbered left to right then front to back in table coordinates."""
-    (ax, ay), (bx, by) = work_area()
-    area = np.array([[ax, ay], [bx, ay], [bx, by], [ax, by]], dtype=np.float32)
-    poly = table_to_px(h, area).astype(np.int32)
+def table_mask(hsv: np.ndarray, within: np.ndarray, th: dict[str, int]) -> np.ndarray:
+    """Pixels that look like the table itself: the dominant colour of the frame, give or take. A wooden
+    table is both coloured and bright enough to pass the object rules, so it is taken out by name."""
+    sample = hsv[within > 0]
+    if len(sample) == 0:
+        return np.zeros(hsv.shape[:2], dtype=np.uint8)
+    hue, sat, val = (float(np.median(sample[:, k])) for k in range(3))
+    if sat < th["white_saturation_max"] and val >= th["white_value_min"]:
+        return np.zeros(hsv.shape[:2], dtype=np.uint8)   # a white table is told apart from white objects by nothing; leave it
+    d_hue = np.minimum(np.abs(hsv[..., 0].astype(int) - hue), 180 - np.abs(hsv[..., 0].astype(int) - hue))
+    near = (d_hue <= th["table_hue_tolerance"]) & (np.abs(hsv[..., 1].astype(int) - sat) <= th["table_saturation_tolerance"]) \
+        & (np.abs(hsv[..., 2].astype(int) - val) <= th["table_value_tolerance"])
+    return (near.astype(np.uint8) * 255)
+
+
+def find_objects(image: np.ndarray, h: np.ndarray | None) -> list[Candidate]:
+    """Saturated blobs on the table, numbered left to right then front to back. With a table map only the
+    work area counts and positions are in metres; without one the whole frame counts and positions are pixels."""
     mask_area = np.zeros(image.shape[:2], dtype=np.uint8)
-    cv2.fillPoly(mask_area, [poly], 255)
+    if h is not None:
+        (ax, ay), (bx, by) = work_area()
+        area = np.array([[ax, ay], [bx, ay], [bx, by], [ax, by]], dtype=np.float32)
+        poly = table_to_px(h, area).astype(np.int32)
+        cv2.fillPoly(mask_area, [poly], 255)
+    else:
+        mask_area[:] = 255
     area_px = int(cv2.countNonZero(mask_area))
     if area_px == 0:
         return []
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    colourful = cv2.inRange(hsv, (0, SATURATION_MIN, VALUE_MIN), (180, 255, 255))
-    mask = cv2.bitwise_and(colourful, mask_area)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    th = thresholds()
+    coloured = cv2.inRange(hsv, (0, th["saturation_min"], th["value_min"]), (180, 255, 255))
+    white = cv2.inRange(hsv, (0, 0, th["white_value_min"]), (180, th["white_saturation_max"], 255))
+    mask = cv2.bitwise_and(cv2.bitwise_or(coloured, white), mask_area)
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(table_mask(hsv, mask_area, th)))
+    # merge the gaps of lattice-like objects first, then drop speckle
+    close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (th["close_px"], th["close_px"]))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
 
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
     found = []
@@ -151,20 +200,31 @@ def find_objects(image: np.ndarray, h: np.ndarray) -> list[Candidate]:
         if not (MIN_AREA_FRACTION * area_px <= area_i <= MAX_AREA_FRACTION * area_px):
             continue
         cx, cy = centroids[i]
-        hue = float(np.median(hsv[..., 0][labels == i]))
-        table = px_to_table(h, np.array([[cx, cy]], dtype=np.float32))[0]
+        pixels = hsv[labels == i]
+        sat, val = float(np.median(pixels[:, 1])), float(np.median(pixels[:, 2]))
+        hue = float(np.median(pixels[:, 0]))
+        if sat < th["white_saturation_max"] + 20 and val >= th["white_value_min"] - 15:
+            hue = -1.0   # white: no hue to speak of
+        table = px_to_table(h, np.array([[cx, cy]], dtype=np.float32))[0] if h is not None else None
         bbox = (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
                 int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT]))
         found.append((table, (float(cx), float(cy)), area_i, bbox, hue))
 
-    found.sort(key=lambda f: (round(f[0][1], 2), f[0][0]))
+    if h is not None:
+        found.sort(key=lambda f: (round(f[0][1], 2), f[0][0]))
+    else:
+        found.sort(key=lambda f: (-round(f[1][1] / 40), f[1][0]))   # image rows bottom-up, then left to right
     return [
-        Candidate(index=n + 1, colour=hue_name(hue), centre_px=px, centre_table=(float(t[0]), float(t[1])),
+        Candidate(index=n + 1, colour=hue_name(hue), centre_px=px,
+                  centre_table=(float(t[0]), float(t[1])) if t is not None else None,
                   area_px=a, bbox=bbox, hue=hue)
         for n, (t, px, a, bbox, hue) in enumerate(found)
     ]
 
 
 def observe(image: np.ndarray) -> Scene:
-    h, markers = find_table(image)
+    try:
+        h, markers = find_table(image)
+    except SceneError:
+        h, markers = None, []
     return Scene(image=image, homography=h, markers=markers, candidates=find_objects(image, h))
