@@ -21,6 +21,7 @@ from .paywall import Settlement
 from .perception import Scene, SceneError, observe
 from .rig import ROLES, Arm, load_rig
 from .selector import Plan, SelectionError, plan as make_plan
+from . import takes
 from .skills import Head, SkillError, Worker
 from .verifier import Verdict, verify
 
@@ -54,6 +55,7 @@ class Job:
     error: str | None = None
     teleop: bool = False
     paid: Settlement | None = None
+    scene: str | None = None
     created_at: float = field(default_factory=time.time)
 
     def summary(self) -> dict[str, Any]:
@@ -85,6 +87,7 @@ class Cell:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self.teleop = None                     # set by the operator when a human can take over
+        self.scene: str | None = None          # a recorded skill to use for every job, when set
 
     # -- lifecycle --------------------------------------------------------------------------------
 
@@ -259,6 +262,8 @@ class Cell:
                              + f" [{job.plan.method}: {job.plan.reason}]", job_id=job.id, arm_role="head")
 
         # 3. bid
+        job.scene = self.scene or (None if job.plan.destination.table is not None and self.workers
+                                   else takes.match_scene(job.instruction))
         self._set(job, "bidding")
         job.bids = self._collect_bids(job)
         winner = choose(job.bids)
@@ -283,15 +288,20 @@ class Cell:
         # 5. work
         self._set(job, "working")
         self._arm_state(winner.role, "working")
-        worker = self.workers[winner.role]
+        worker = self.workers.get(winner.role)
         try:
             with self._lock:
-                worker.pick_and_place(job.plan.target.centre_table, job.plan.destination.table,
-                                      log=lambda m: self.publisher.event("pick" if "moving" in m else "place", m,
-                                                                         job_id=job.id, arm_role=winner.role))
-        except SkillError as exc:
+                if job.scene is not None:
+                    self._perform(job, winner.role)
+                elif worker is not None:
+                    worker.pick_and_place(job.plan.target.centre_table, job.plan.destination.table,
+                                          log=lambda m: self.publisher.event("pick" if "moving" in m else "place", m,
+                                                                             job_id=job.id, arm_role=winner.role))
+                else:
+                    raise SkillError(f"{winner.role} has neither a table frame nor a recorded skill")
+        except (SkillError, RuntimeError, FileNotFoundError) as exc:
             self.publisher.event("error", str(exc), job_id=job.id, arm_role=winner.role)
-            if not self._hand_over(job, worker):
+            if worker is None or not self._hand_over(job, worker):
                 self._arm_state(winner.role, "idle")
                 return self._fail(job, str(exc))
         self._arm_state(winner.role, "idle")
@@ -308,7 +318,7 @@ class Cell:
         self.publisher.job(job.id, verdict=job.verdict.to_dict())
         self.publisher.event("verify", ("done: " if job.verdict.ok else "not done: ") + job.verdict.reason,
                              job_id=job.id, arm_role="head")
-        if not job.verdict.ok and not job.teleop and self._hand_over(job, worker):
+        if not job.verdict.ok and not job.teleop and worker is not None and self._hand_over(job, worker):
             after = self._look(job, "after")
             job.verdict = verify(before, after, job.plan)
             self.publisher.job(job.id, verdict=job.verdict.to_dict())
@@ -327,24 +337,33 @@ class Cell:
                   finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         self._after_job(winner.role, winner.price_drops)
         with self._lock:
-            worker.rest()
-            if self.head:
-                self.head.rest()
+            for arm in self.arms.values():
+                arm.rest()
 
     def _collect_bids(self, job: Job) -> list[Bid]:
         assert job.plan is not None
         bids = []
         ceiling = int(job.price_drops * (1 - VERIFIER_FEE - OPERATOR_FEE))
-        for role, worker in self.workers.items():
+        recorded = set(takes.load_scene(job.scene)) if job.scene else set()
+        for role in ("left", "right"):
+            if role not in self.arms:
+                continue
             self._arm_state(role, "bidding")
-            with self._lock:
-                can_reach, reach_m = worker.reach(job.plan.target.centre_table)
-                if can_reach:
-                    can_reach, reach_dest = worker.reach(job.plan.destination.table)
-                    reach_m = max(reach_m, reach_dest)
+            worker = self.workers.get(role)
+            if job.scene is None and worker is not None and job.plan.target.centre_table is not None:
+                with self._lock:
+                    can_reach, reach_m = worker.reach(job.plan.target.centre_table)
+                    if can_reach and job.plan.destination.table is not None:
+                        can_reach, reach_dest = worker.reach(job.plan.destination.table)
+                        reach_m = max(reach_m, reach_dest)
+            else:
+                can_reach = role in recorded
+                reach_m = 0.18 if can_reach else 0.0
             debt = self._debt(role)
             bid = quote(role, can_reach=can_reach, reach_m=reach_m, health=self.health.get(role) or
                         Health(0.0, 0.0, 0.0, 0, ["no health reading"]), debt_drops=debt, ceiling_drops=ceiling)
+            if not can_reach and job.scene is not None and role not in recorded:
+                bid = Bid(role, False, 0.0, bid.health_score, 0, f"no recorded skill for '{job.scene}'")
             bids.append(bid)
             self.publisher.bid(job.id, arm_role=role, price_drops=bid.price_drops, reach_m=bid.reach_m,
                                health_score=bid.health_score, feasible=bid.feasible, reason=bid.reason)
@@ -353,6 +372,22 @@ class Cell:
                                  amount_drops=bid.price_drops if bid.feasible else None)
             self._arm_state(role, "idle")
         return bids
+
+    def _perform(self, job: Job, lead: str) -> None:
+        """Play the recorded skill: every arm with a take in the scene moves, together."""
+        assert job.scene is not None
+        cast = {r: a for r, a in self.arms.items()}
+        for role in cast:
+            if role != lead:
+                self._arm_state(role, "working")
+        self.publisher.event("pick", f"{lead} runs the recorded skill '{job.scene}'"
+                             + (" with " + ", ".join(r for r in takes.load_scene(job.scene) if r != lead and r in cast)
+                                if len(takes.load_scene(job.scene)) > 1 else ""), job_id=job.id, arm_role=lead)
+        durations = takes.play(cast, job.scene, log=lambda m: log.info(m))
+        self.publisher.event("place", f"skill finished in {max(durations.values()):.1f} s", job_id=job.id, arm_role=lead)
+        for role in cast:
+            if role != lead:
+                self._arm_state(role, "idle")
 
     def _debt(self, role: str) -> int:
         lending = getattr(self, "lending", None)
