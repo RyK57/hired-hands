@@ -88,6 +88,7 @@ class Cell:
         self._stop = threading.Event()
         self.teleop = None                     # set by the operator when a human can take over
         self.scene: str | None = None          # a recorded skill to use for every job, when set
+        self.take_speed = 1.0                  # playback speed for recorded skills
 
     # -- lifecycle --------------------------------------------------------------------------------
 
@@ -383,7 +384,7 @@ class Cell:
         self.publisher.event("pick", f"{lead} runs the recorded skill '{job.scene}'"
                              + (" with " + ", ".join(r for r in takes.load_scene(job.scene) if r != lead and r in cast)
                                 if len(takes.load_scene(job.scene)) > 1 else ""), job_id=job.id, arm_role=lead)
-        durations = takes.play(cast, job.scene, log=lambda m: log.info(m))
+        durations = takes.play(cast, job.scene, speed=self.take_speed, log=lambda m: log.info(m))
         self.publisher.event("place", f"skill finished in {max(durations.values()):.1f} s", job_id=job.id, arm_role=lead)
         for role in cast:
             if role != lead:

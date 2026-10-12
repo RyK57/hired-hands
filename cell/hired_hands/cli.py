@@ -37,6 +37,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
         print(f"public address: {public_url}")
     cell = Cell(publisher=publisher, dashboard_url=args.dashboard or cfg.dashboard_url)
     cell.scene = args.scene
+    cell.take_speed = args.take_speed
     cell.start()
     from .finance import Desk
     desk = Desk(cell.ledger, publisher)
@@ -400,6 +401,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--tunnel", action="store_true", help="open a public address for the API")
     p.add_argument("--voice", action="store_true", help="take orders by voice through the dashboard")
     p.add_argument("--scene", help="use this recorded skill for every job")
+    p.add_argument("--take-speed", type=float, default=1.0, help="playback speed for recorded skills")
     p.set_defaults(run=cmd_serve)
 
     p = sub.add_parser("setup", help="fund wallets, publish identities, create the vault domain")
