@@ -156,15 +156,47 @@ def cmd_pose(args: argparse.Namespace) -> None:
 
 
 def cmd_calibrate(args: argparse.Namespace) -> None:
+    if args.sheet:
+        return _calibrate_on_sheet(args.sheet)
+
+    from .calibrate import calibrate_rig
+    from .camera import Camera
+    from .kinematics import Kinematics
+    from .rig import Arm, load_rig
+    from .skills import Head
+
+    rig = load_rig()
+    arms = {}
+    head = None
+    for role, spec in rig.items():
+        arm = Arm(spec)
+        arm.connect()
+        if spec.camera:
+            head = Head(arm)
+        else:
+            arms[role] = arm
+    if head is None:
+        sys.exit("no head arm (the one with the camera) in the rig")
+    print("Clear the table of everything except what the arms will hold.")
+    with Camera() as camera:
+        table = calibrate_rig(arms, head, camera, Kinematics(), anchor=args.anchor, ask=lambda m: input(m + " "))
+    print(f"table map saved; camera fit {table.fit_error_m * 1000:.0f} mm; "
+          f"bases: " + ", ".join(f"{r} ({x:+.2f}, {y:+.2f})" for r, (x, y, _) in table.bases.items()))
+    for arm in arms.values():
+        arm.disconnect()
+    head.arm.disconnect()
+
+
+def _calibrate_on_sheet(role: str) -> None:
     import numpy as np
 
     from .board import MARKERS
     from .kinematics import Kinematics, TableFrame
 
     kin = Kinematics()
-    arm = _arm(args.role)
+    arm = _arm(role)
     arm.torque(False)
-    print(f"{args.role}: torque is off. Close the gripper by hand and rest its tip on each marker's centre.")
+    print(f"{role}: torque is off. Close the gripper by hand and rest its tip on each marker's centre.")
     arm_points, table_points = [], []
     for marker_id, centre in MARKERS.items():
         input(f"  tip on the centre of marker {marker_id} at ({centre[0]:+.3f}, {centre[1]:+.3f}) -> Enter")
@@ -176,7 +208,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
     z_table = float(kin.tip(arm.read())[2])
     frame = TableFrame.fit(arm_points, table_points, z_table)
     residuals = [float(np.linalg.norm(frame.to_table(a) - np.asarray(t))) for a, t in zip(arm_points, table_points)]
-    path = frame.save(args.role)
+    path = frame.save(role)
     print(f"base at ({frame.origin[0]:+.3f}, {frame.origin[1]:+.3f}) m, yaw {np.degrees(frame.yaw):+.1f} deg, "
           f"table z {z_table:+.3f} m; fit error {max(residuals) * 1000:.1f} mm -> {path}")
     arm.disconnect()
@@ -340,8 +372,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("name")
     p.set_defaults(run=cmd_pose)
 
-    p = sub.add_parser("calibrate", help="measure where an arm sits on the table")
-    p.add_argument("role", choices=["left", "right"])
+    p = sub.add_parser("calibrate", help="let the arms measure the camera and the table themselves")
+    p.add_argument("--anchor", choices=["left", "right"], default="left", help="the arm whose base frame becomes the table frame")
+    p.add_argument("--sheet", choices=["left", "right"], metavar="ROLE", help="instead, place this arm on the printed sheet by touching its markers")
     p.set_defaults(run=cmd_calibrate)
 
     p = sub.add_parser("survey", help="take a look at the table from the head camera")

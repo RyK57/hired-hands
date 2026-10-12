@@ -113,6 +113,10 @@ class Cell:
         for role in self.arms:
             self.publisher.arm(role, state="idle", board=self.rig[role].board, address=self.ledger.address(role),
                                did=did.did_for(self.ledger.address(role)), joints=self.arms[role].read())
+        from .table import TableMap
+        table = TableMap.load()
+        if table is not None:
+            self.publisher.cell(layout=table.layout())
         threading.Thread(target=self._health_loop, name="health", daemon=True).start()
         threading.Thread(target=self._job_loop, name="jobs", daemon=True).start()
 
