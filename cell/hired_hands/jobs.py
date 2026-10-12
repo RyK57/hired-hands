@@ -435,25 +435,24 @@ class Cell:
             batch.payment(treasury, self.ledger.address("head"), int(job.price_drops * VERIFIER_FEE)),
             batch.payment(treasury, self.ledger.address("operator"), int(job.price_drops * OPERATOR_FEE)),
         ]
-        cosigners = []
-        lending = getattr(self, "lending", None)
-        repayment = None
-        if lending is not None:
-            repayment = lending.repayment(winner.role, winner.price_drops)
-            if repayment is not None:
-                transfers.append(repayment.transaction)
-                cosigners.append(self.ledger.wallet(winner.role))
         try:
-            done = batch.settle(self.ledger, treasury, transfers, cosigners)
+            done = batch.settle(self.ledger, treasury, transfers, [])
         except Exception as exc:
             self.publisher.event("error", f"settlement failed: {exc}", job_id=job.id)
             return None
-        message = (f"settled in one batch: {VERIFIER_FEE:.0%} to head, {OPERATOR_FEE:.0%} to the operator"
-                   + (f", {repayment.amount_drops / 1e6:.2f} XRP of {winner.role}'s loan repaid" if repayment else ""))
-        self.publisher.event("settlement", message, job_id=job.id, tx_hash=done.hash,
+        self.publisher.event("settlement", f"settled in one batch: {VERIFIER_FEE:.0%} to head for verifying, "
+                             f"{OPERATOR_FEE:.0%} to the operator", job_id=job.id, tx_hash=done.hash,
                              amount_drops=int(job.price_drops * (VERIFIER_FEE + OPERATOR_FEE)))
-        if repayment is not None:
-            lending.record_payment(job.id, winner.role, repayment, done.hash)
+        lending = getattr(self, "lending", None)
+        if lending is not None:
+            repayment = lending.repayment(winner.role, winner.price_drops)
+            if repayment is not None:
+                try:
+                    paid = self.ledger.submit(repayment.transaction, self.ledger.wallet(winner.role))
+                    lending.record_payment(job.id, winner.role, repayment, paid.hash)
+                except Exception as exc:
+                    self.publisher.event("error", f"{winner.role}: loan repayment failed: {exc}", job_id=job.id,
+                                         arm_role=winner.role)
         return done
 
     def _after_job(self, role: str, earned_drops: int) -> None:
