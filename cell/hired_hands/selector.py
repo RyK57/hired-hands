@@ -17,7 +17,7 @@ from .table import work_area
 from .config import settings
 from .perception import HUE_NAMES, Candidate, Scene
 
-COLOURS = sorted({name for _, _, name in HUE_NAMES})
+COLOURS = sorted({name for _, _, name in HUE_NAMES} | {"white"})
 ZONES = {
     "left": (-0.07, 0.0), "right": (0.07, 0.0), "front": (0.0, -0.035), "back": (0.0, 0.035),
     "centre": (0.0, 0.0), "center": (0.0, 0.0), "middle": (0.0, 0.0),
@@ -26,18 +26,25 @@ ZONES = {
 
 @dataclass(frozen=True)
 class Spot:
-    """A place on the table: another object, or a point."""
-    table: tuple[float, float]
+    """A place on the table: another object, or a point. Positions are in table metres when the table has
+    been measured, otherwise in image pixels."""
+    table: tuple[float, float] | None
+    px: tuple[float, float] | None = None
     index: int | None = None
     colour: str | None = None
 
     def to_dict(self) -> dict:
-        d = {"table": [round(self.table[0], 4), round(self.table[1], 4)]}
+        d: dict = {"table": [round(self.table[0], 4), round(self.table[1], 4)] if self.table else None,
+                   "px": [round(self.px[0], 1), round(self.px[1], 1)] if self.px else None}
         if self.index is not None:
             d["index"] = self.index
         if self.colour is not None:
             d["colour"] = self.colour
         return d
+
+    @classmethod
+    def of(cls, candidate: Candidate) -> "Spot":
+        return cls(table=candidate.centre_table, px=candidate.centre_px, index=candidate.index, colour=candidate.colour)
 
 
 @dataclass(frozen=True)
@@ -57,11 +64,16 @@ def _colour_words(text: str) -> list[str]:
     return [w for w in words if w in COLOURS]
 
 
-def _zone(text: str) -> tuple[float, float] | None:
+def _zone(text: str, scene: Scene) -> Spot | None:
     words = re.findall(r"[a-z]+", text.lower())
     for w in words:
         if w in ZONES:
-            return ZONES[w]
+            if scene.mapped:
+                return Spot(table=ZONES[w])
+            h, wdt = scene.image.shape[:2]
+            px = {"left": (wdt * 0.2, h * 0.55), "right": (wdt * 0.8, h * 0.55), "front": (wdt * 0.5, h * 0.8),
+                  "back": (wdt * 0.5, h * 0.3)}.get(w, (wdt * 0.5, h * 0.55))
+            return Spot(table=None, px=px)
     return None
 
 
@@ -83,12 +95,11 @@ def plan_by_colour(instruction: str, scene: Scene) -> Plan:
         other = _by_colour(colours[1], scene.candidates, exclude=target.index)
         if other is None:
             raise SelectionError(f"no {colours[1]} object is on the table")
-        destination = Spot(table=other.centre_table, index=other.index, colour=other.colour)
+        destination = Spot.of(other)
     else:
-        zone = _zone(instruction)
-        if zone is None:
+        destination = _zone(instruction, scene)
+        if destination is None:
             raise SelectionError("the instruction says where to pick from but not where to put it")
-        destination = Spot(table=zone)
     return Plan(target=target, destination=destination, method="colour",
                 reason=f"matched '{colours[0]}'" + (f" and '{colours[1]}'" if len(colours) > 1 else ""))
 
@@ -119,7 +130,9 @@ def plan_by_model(instruction: str, scene: Scene) -> Plan:
         raise SelectionError("could not encode the frame")
     (x0, y0), (x1, y1) = work_area()
     listing = "\n".join(
-        f"{c.index}: {c.colour}, ({c.centre_table[0]:+.3f}, {c.centre_table[1]:+.3f})" for c in scene.candidates
+        f"{c.index}: {c.colour}, " + (f"({c.centre_table[0]:+.3f}, {c.centre_table[1]:+.3f})" if c.centre_table
+                                      else f"pixel ({c.centre_px[0]:.0f}, {c.centre_px[1]:.0f})")
+        for c in scene.candidates
     ) or "(none)"
     client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
     response = client.messages.create(
@@ -149,10 +162,12 @@ def plan_by_model(instruction: str, scene: Scene) -> Plan:
         other = scene.find(int(answer["destination"]))
         if other is None:
             raise SelectionError(f"the model chose destination {answer['destination']}, which is not on the table")
-        destination = Spot(table=other.centre_table, index=other.index, colour=other.colour)
-    elif answer.get("destination_point"):
+        destination = Spot.of(other)
+    elif answer.get("destination_point") and scene.mapped:
         x, y = (float(v) for v in answer["destination_point"])
         destination = Spot(table=(min(max(x, x0), x1), min(max(y, y0), y1)))
+    elif answer.get("destination_point"):
+        raise SelectionError("the destination must be an object until the table has been measured")
     else:
         raise SelectionError("the model named a target but no destination")
     return Plan(target=target, destination=destination, method="model", reason=str(answer.get("reason", "")))

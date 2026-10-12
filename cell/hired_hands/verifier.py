@@ -10,6 +10,9 @@ from .selector import Plan
 PLACED_WITHIN_M = 0.035       # the target's centre must end up this close to the destination
 CONTAINED_WITHIN_M = 0.045    # or this close to another object's centre when put in or on it
 MOVED_AT_LEAST_M = 0.03       # and it must have moved from where it started
+PLACED_WITHIN_PX = 55         # the same three, in pixels, for a table that has not been measured
+CONTAINED_WITHIN_PX = 70
+MOVED_AT_LEAST_PX = 35
 
 
 @dataclass(frozen=True)
@@ -28,34 +31,46 @@ class Verdict:
         return d
 
 
-def _nearest(colour: str, candidates: list[Candidate], to: tuple[float, float]) -> Candidate | None:
+def _position(c: Candidate, mapped: bool) -> tuple[float, float]:
+    return c.centre_table if mapped and c.centre_table else c.centre_px
+
+
+def _nearest(colour: str, candidates: list[Candidate], to: tuple[float, float], mapped: bool) -> Candidate | None:
     same = [c for c in candidates if c.colour == colour]
     if not same:
         return None
-    return min(same, key=lambda c: math.dist(c.centre_table, to))
+    return min(same, key=lambda c: math.dist(_position(c, mapped), to))
 
 
 def verify(before: Scene, after: Scene, plan: Plan) -> Verdict:
-    target_was = plan.target.centre_table
-    destination = plan.destination.table
-    found = _nearest(plan.target.colour, after.candidates, destination)
+    mapped = before.mapped and after.mapped and plan.destination.table is not None
+    unit, scale = ("cm", 100.0) if mapped else ("px", 1.0)
+    placed, contained, moved_min = ((PLACED_WITHIN_M, CONTAINED_WITHIN_M, MOVED_AT_LEAST_M) if mapped
+                                    else (PLACED_WITHIN_PX, CONTAINED_WITHIN_PX, MOVED_AT_LEAST_PX))
+    target_was = _position(plan.target, mapped)
+    destination = plan.destination.table if mapped else plan.destination.px
+    if destination is None:
+        return Verdict(False, "the destination has no position to check against")
+    found = _nearest(plan.target.colour, after.candidates, destination, mapped)
 
     if found is None:
         if plan.destination.index is not None:
             # dropped inside something that now hides it: the destination must still be there, the target gone
-            holder = _nearest(plan.destination.colour or "", after.candidates, destination)
-            if holder is not None and math.dist(holder.centre_table, destination) < CONTAINED_WITHIN_M:
+            holder = _nearest(plan.destination.colour or "", after.candidates, destination, mapped)
+            if holder is not None and math.dist(_position(holder, mapped), destination) < contained:
                 return Verdict(True, f"the {plan.target.colour} object is no longer visible and the "
                                      f"{plan.destination.colour} one is still in place: it went inside")
         return Verdict(False, f"no {plan.target.colour} object is visible any more")
 
-    distance = math.dist(found.centre_table, destination)
-    moved = math.dist(found.centre_table, target_was)
-    limit = CONTAINED_WITHIN_M if plan.destination.index is not None else PLACED_WITHIN_M
-    if distance <= limit and (moved >= MOVED_AT_LEAST_M or math.dist(target_was, destination) < MOVED_AT_LEAST_M):
-        return Verdict(True, f"the {plan.target.colour} object is {distance * 100:.1f} cm from the destination",
-                       distance, moved)
-    if moved < MOVED_AT_LEAST_M:
-        return Verdict(False, f"the {plan.target.colour} object did not move", distance, moved)
-    return Verdict(False, f"the {plan.target.colour} object ended {distance * 100:.1f} cm from the destination",
-                   distance, moved)
+    position = _position(found, mapped)
+    distance = math.dist(position, destination)
+    moved = math.dist(position, target_was)
+    limit = contained if plan.destination.index is not None else placed
+    if distance <= limit and (moved >= moved_min or math.dist(target_was, destination) < moved_min):
+        return Verdict(True, f"the {plan.target.colour} object is {distance * scale:.0f} {unit} from the destination",
+                       distance if mapped else None, moved if mapped else None)
+    if moved < moved_min:
+        return Verdict(False, f"the {plan.target.colour} object did not move", distance if mapped else None,
+                       moved if mapped else None)
+    return Verdict(False, f"the {plan.target.colour} object ended {distance * scale:.0f} {unit} from the destination",
+                   distance if mapped else None, moved if mapped else None)
