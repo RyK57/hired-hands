@@ -97,9 +97,11 @@ class Arm:
         """A marginal supply can leave a servo with a latched protection flag, which the bus reports as an
         error on the next read. Clear the flags and try again rather than give up on the arm."""
         last: Exception | None = None
+        calibrated = False
         for attempt in range(attempts):
             try:
                 self._robot.connect(calibrate=False)
+                calibrated = self._robot.is_calibrated
                 break
             except Exception as exc:
                 last = exc
@@ -109,7 +111,7 @@ class Arm:
                 time.sleep(0.6 * (attempt + 1))
         else:
             raise RuntimeError(f"{self.role}: could not connect ({last})")
-        if not self._robot.is_calibrated:
+        if not calibrated:
             self._robot.disconnect()
             raise RuntimeError(
                 f"{self.role}: the servos do not match {self._robot.calibration_fpath}; refusing to drive them"
