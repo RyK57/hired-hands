@@ -12,7 +12,7 @@ from .board import DICTIONARY, MARKERS, marker_corners_table
 from .table import TableMap, work_area
 
 MIN_MARKERS = 2
-MIN_AREA_FRACTION = 0.0015   # of the work area, in pixels
+MIN_AREA_FRACTION = 0.004    # of the work area, in pixels
 MAX_AREA_FRACTION = 0.25
 
 # Colour classes. Saturated objects are told apart by hue; white ones are bright and unsaturated. A wooden
@@ -184,31 +184,31 @@ def find_objects(image: np.ndarray, h: np.ndarray | None) -> list[Candidate]:
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     th = thresholds()
-    coloured = cv2.inRange(hsv, (0, th["saturation_min"], th["value_min"]), (180, 255, 255))
-    white = cv2.inRange(hsv, (0, 0, th["white_value_min"]), (180, th["white_saturation_max"], 255))
-    mask = cv2.bitwise_and(cv2.bitwise_or(coloured, white), mask_area)
-    mask = cv2.bitwise_and(mask, cv2.bitwise_not(table_mask(hsv, mask_area, th)))
-    # merge the gaps of lattice-like objects first, then drop speckle
+    not_table = cv2.bitwise_not(table_mask(hsv, mask_area, th))
+    classes = {
+        "coloured": cv2.inRange(hsv, (0, th["saturation_min"], th["value_min"]), (180, 255, 255)),
+        "white": cv2.inRange(hsv, (0, 0, th["white_value_min"]), (180, th["white_saturation_max"], 255)),
+    }
     close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (th["close_px"], th["close_px"]))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-
-    count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    open_ = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     found = []
-    for i in range(1, count):
-        area_i = int(stats[i, cv2.CC_STAT_AREA])
-        if not (MIN_AREA_FRACTION * area_px <= area_i <= MAX_AREA_FRACTION * area_px):
-            continue
-        cx, cy = centroids[i]
-        pixels = hsv[labels == i]
-        sat, val = float(np.median(pixels[:, 1])), float(np.median(pixels[:, 2]))
-        hue = float(np.median(pixels[:, 0]))
-        if sat < th["white_saturation_max"] + 20 and val >= th["white_value_min"] - 15:
-            hue = -1.0   # white: no hue to speak of
-        table = px_to_table(h, np.array([[cx, cy]], dtype=np.float32))[0] if h is not None else None
-        bbox = (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
-                int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT]))
-        found.append((table, (float(cx), float(cy)), area_i, bbox, hue))
+    # each colour class is segmented on its own, so a white object touching an orange one stays separate
+    for kind, raw in classes.items():
+        mask = cv2.bitwise_and(cv2.bitwise_and(raw, mask_area), not_table)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close)   # merge the gaps of lattice-like objects
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_)    # then drop speckle
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        for i in range(1, count):
+            area_i = int(stats[i, cv2.CC_STAT_AREA])
+            if not (MIN_AREA_FRACTION * area_px <= area_i <= MAX_AREA_FRACTION * area_px):
+                continue
+            cx, cy = centroids[i]
+            pixels = hsv[(labels == i) & (raw > 0)]
+            hue = -1.0 if kind == "white" else float(np.median(pixels[:, 0])) if len(pixels) else 0.0
+            table = px_to_table(h, np.array([[cx, cy]], dtype=np.float32))[0] if h is not None else None
+            bbox = (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
+                    int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT]))
+            found.append((table, (float(cx), float(cy)), area_i, bbox, hue))
 
     if h is not None:
         found.sort(key=lambda f: (round(f[0][1], 2), f[0][0]))

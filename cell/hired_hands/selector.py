@@ -77,22 +77,28 @@ def _zone(text: str, scene: Scene) -> Spot | None:
     return None
 
 
-def _by_colour(colour: str, candidates: list[Candidate], exclude: int | None = None) -> Candidate | None:
-    for c in candidates:
-        if c.colour == colour and c.index != exclude:
-            return c
-    return None
+def _by_colour(colour: str, candidates: list[Candidate], exclude: int | None = None,
+               centre: tuple[float, float] | None = None) -> Candidate | None:
+    """The candidate of this colour; with several, the one closest to the middle of the view."""
+    same = [c for c in candidates if c.colour == colour and c.index != exclude]
+    if not same:
+        return None
+    if centre is None:
+        return same[0]
+    return min(same, key=lambda c: (c.centre_px[0] - centre[0]) ** 2 + (c.centre_px[1] - centre[1]) ** 2)
 
 
 def plan_by_colour(instruction: str, scene: Scene) -> Plan:
     colours = _colour_words(instruction)
     if not colours:
         raise SelectionError("the instruction names no colour and no model is configured to read the scene")
-    target = _by_colour(colours[0], scene.candidates)
+    h, w = scene.image.shape[:2]
+    middle = (w / 2, h / 2)
+    target = _by_colour(colours[0], scene.candidates, centre=middle)
     if target is None:
         raise SelectionError(f"no {colours[0]} object is on the table")
     if len(colours) > 1:
-        other = _by_colour(colours[1], scene.candidates, exclude=target.index)
+        other = _by_colour(colours[1], scene.candidates, exclude=target.index, centre=middle)
         if other is None:
             raise SelectionError(f"no {colours[1]} object is on the table")
         destination = Spot.of(other)

@@ -66,6 +66,15 @@ def verify(before: Scene, after: Scene, plan: Plan) -> Verdict:
     distance = math.dist(position, destination)
     moved = math.dist(position, target_was)
     limit = contained if plan.destination.index is not None else placed
+    if plan.destination.index is not None and moved >= moved_min:
+        # inside the destination's outline counts, however big the destination is
+        holder = _nearest(plan.destination.colour or "", after.candidates, destination, mapped)
+        if holder is not None:
+            x0, y0, w, h = holder.bbox
+            px, py = found.centre_px
+            if x0 - 12 <= px <= x0 + w + 12 and y0 - 12 <= py <= y0 + h + 12:
+                return Verdict(True, f"the {plan.target.colour} object is inside the {holder.colour} one",
+                               distance if mapped else None, moved if mapped else None)
     if distance <= limit and (moved >= moved_min or math.dist(target_was, destination) < moved_min):
         return Verdict(True, f"the {plan.target.colour} object is {distance * scale:.0f} {unit} from the destination",
                        distance if mapped else None, moved if mapped else None)
