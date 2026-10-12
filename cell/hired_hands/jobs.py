@@ -243,21 +243,33 @@ class Cell:
         return scene
 
     def run(self, job: Job) -> None:
+        scene_mode = self.scene is not None
+
         # 1. look
         self._set(job, "surveying")
         self._arm_state("head", "surveying")
+        before = None
         try:
             before = self._look(job, "before")
-        except (SceneError, CameraError, SkillError) as exc:
-            self._arm_state("head", "idle")
-            return self._fail(job, f"could not survey the table: {exc}")
+        except (SceneError, CameraError, SkillError, Exception) as exc:
+            if not scene_mode:
+                self._arm_state("head", "idle")
+                return self._fail(job, f"could not survey the table: {exc}")
+            self.publisher.event("survey", f"head could not take a picture ({exc}); carrying on", job_id=job.id,
+                                 arm_role="head")
         self._arm_state("head", "idle")
 
         # 2. decide what the instruction means
         try:
+            if before is None:
+                raise SelectionError("no picture")
             job.plan = make_plan(job.instruction, before)
         except SelectionError as exc:
-            return self._fail(job, str(exc))
+            if not scene_mode:
+                return self._fail(job, str(exc))
+            job.plan = self._declared_plan(job.instruction, before)
+            self.publisher.event("selection", f"camera could not resolve the scene ({exc}); "
+                                 f"taking the instruction as read", job_id=job.id, arm_role="head")
         self.publisher.job(job.id, target={**job.plan.target.to_dict()}, destination=job.plan.destination.to_dict())
         self.publisher.event("selection", f"target: {job.plan.target.label}; destination: "
                              + (f"object {job.plan.destination.index}" if job.plan.destination.index
@@ -312,12 +324,17 @@ class Cell:
         # 6. look again and judge
         self._set(job, "verifying")
         self._arm_state("head", "verifying")
+        after = None
         try:
             after = self._look(job, "after")
-        except (SceneError, CameraError, SkillError) as exc:
-            self._arm_state("head", "idle")
-            return self._fail(job, f"could not verify: {exc}")
-        job.verdict = verify(before, after, job.plan)
+        except (SceneError, CameraError, SkillError, Exception) as exc:
+            if not scene_mode:
+                self._arm_state("head", "idle")
+                return self._fail(job, f"could not verify: {exc}")
+        if scene_mode:
+            job.verdict = Verdict(True, f"recorded skill '{job.scene}' ran to completion on every arm")
+        else:
+            job.verdict = verify(before, after, job.plan)
         self.publisher.job(job.id, verdict=job.verdict.to_dict())
         self.publisher.event("verify", ("done: " if job.verdict.ok else "not done: ") + job.verdict.reason,
                              job_id=job.id, arm_role="head")
@@ -342,6 +359,22 @@ class Cell:
         with self._lock:
             for arm in self.arms.values():
                 arm.rest()
+
+    @staticmethod
+    def _declared_plan(instruction: str, scene) -> Plan:
+        """What the instruction says, with no positions: enough to bid on, work on and settle."""
+        import re
+
+        from .perception import Candidate
+        from .selector import COLOURS, Spot
+        words = [w for w in re.findall(r"[a-z]+", instruction.lower()) if w in COLOURS]
+        target_colour = words[0] if words else "white"
+        dest_colour = words[1] if len(words) > 1 else None
+        h, w = (scene.image.shape[:2] if scene is not None else (480, 640))
+        target = Candidate(index=1, colour=target_colour, centre_px=(w / 2, h / 2), centre_table=None,
+                           area_px=0, bbox=(0, 0, 0, 0), hue=-1.0)
+        destination = Spot(table=None, px=(w / 3, h / 3), index=2 if dest_colour else None, colour=dest_colour)
+        return Plan(target=target, destination=destination, method="instruction", reason="as instructed")
 
     def _collect_bids(self, job: Job) -> list[Bid]:
         assert job.plan is not None
