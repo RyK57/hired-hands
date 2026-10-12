@@ -28,7 +28,7 @@ The live dashboard at [hiredhands.vercel.app](https://hiredhands.vercel.app) sho
 3. **Decide.** A vision-language model, or the colour words in the instruction, picks the target and the destination among the numbered candidates.
 4. **Bid.** Each working arm quotes a price from its reach, its distance to the work, its health and its debt. The lowest feasible bid wins.
 5. **Lock.** The treasury escrows the winning bid for the winner behind a crypto-condition. The head arm holds the secret.
-6. **Work.** The winner picks and places with inverse kinematics on the shared table frame.
+6. **Work.** The winner picks and places with inverse kinematics on the shared table frame, or the arms play a recorded skill that matches the instruction.
 7. **Check.** The head arm looks again. If the target ended where it was asked to go, the head releases the escrow.
 8. **Settle.** One all-or-nothing batch pays the head's verification fee, the operator's fee and, when the worker has a loan, its repayment.
 9. **Hand over.** If a step fails, a person can drive the arm from the keyboard; every second is signed over a payment channel and redeemed when they hand the arm back.
@@ -47,8 +47,7 @@ cp cell/.env.example cell/.env      # fill in the database key and, optionally, 
 hands setup                         # fund the cell's accounts, publish the arms' identities
 hands board                         # print cell/captures/work-surface.png at 100 % scale
 hands pose head head.survey         # the viewpoint over the table
-hands pose left left.ready          # a raised pose out of the camera's way, once per working arm
-hands calibrate left                # where the arm sits on the table, once per working arm
+hands calibrate                     # the arms measure the camera and each other; no printed target needed
 hands serve                         # the cell and its API
 ```
 
@@ -59,6 +58,13 @@ hands hire "put the red block in the blue cup"
 ```
 
 `hands serve --tunnel --voice --teleop` also opens a public address, a voice front desk on the dashboard, and the keyboard takeover for a human operator.
+
+Recorded skills: record one take per arm with any teleop that writes joint frames, then
+
+```bash
+hands take import drone ./recordings --instruction "put the white drone in the orange container"
+hands take play drone
+```
 
 ## Dashboard
 
